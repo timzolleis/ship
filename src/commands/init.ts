@@ -43,27 +43,49 @@ interface DetectedEnv {
   readonly vars: Record<string, { value: string; type: "database_url" | "proxy_url" | "dev_url" | "plain" }>
 }
 
+/** Recursively find .env files, respecting .gitignore-style exclusions */
+const findEnvFiles = (
+  dir: string,
+  root: string
+): Effect.Effect<string[], never, FileSystem.FileSystem | Path.Path> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const pathSvc = yield* Path.Path
+    const results: string[] = []
+
+    const entries = yield* fs.readDirectory(dir).pipe(Effect.catchAll(() => Effect.succeed([] as string[])))
+
+    for (const entry of entries) {
+      // Skip common non-project dirs
+      if (["node_modules", ".git", "dist", "build", ".next", ".cache", ".turbo"].includes(entry)) continue
+
+      const fullPath = pathSvc.join(dir, entry)
+      const stat = yield* fs.stat(fullPath).pipe(Effect.catchAll(() => Effect.succeed(null)))
+      if (!stat) continue
+
+      if (stat.type === "Directory") {
+        const nested = yield* findEnvFiles(fullPath, root)
+        results.push(...nested)
+      } else if (entry === ".env") {
+        // Store as relative path from project root
+        const relative = pathSvc.relative(root, fullPath)
+        results.push(relative)
+      }
+    }
+
+    return results
+  })
+
 const detectEnvFiles = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem
   const pathSvc = yield* Path.Path
   const cwd = process.cwd()
 
   const results: DetectedEnv[] = []
+  const envFiles = yield* findEnvFiles(cwd, cwd)
 
-  // Find .env files (common locations in monorepos)
-  const candidates = [
-    ".env",
-    "apps/dashboard/.env",
-    "packages/db/.env",
-    "apps/web/.env",
-    "apps/api/.env",
-  ]
-
-  for (const candidate of candidates) {
+  for (const candidate of envFiles) {
     const fullPath = pathSvc.join(cwd, candidate)
-    const exists = yield* fs.exists(fullPath)
-    if (!exists) continue
-
     const content = yield* fs.readFileString(fullPath)
     const vars: DetectedEnv["vars"] = {}
 
@@ -77,7 +99,6 @@ const detectEnvFiles = Effect.gen(function* () {
       if (key === "DATABASE_URL" || key.endsWith("_DATABASE_URL") || key === "QUEUE_DATABASE_URL") {
         vars[key] = { value, type: "database_url" }
       } else if (key.endsWith("_URL") && value.includes(".localhost")) {
-        // Only auto-patch URLs pointing to .localhost domains
         vars[key] = { value, type: "proxy_url" }
       } else if (key.endsWith("_CALLBACK_URL") && value.startsWith("http://localhost")) {
         vars[key] = { value, type: "dev_url" }

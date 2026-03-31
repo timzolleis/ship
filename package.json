@@ -1,0 +1,22 @@
+{
+  "name": "ship",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run src/main.ts",
+    "build": "bun build src/main.ts --compile --outfile ship",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/cli": "latest",
+    "@effect/platform": "latest",
+    "@effect/platform-bun": "latest",
+    "@effect/platform-node": "latest",
+    "effect": "latest"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "@types/node": "^22.0.0"
+  }
+}

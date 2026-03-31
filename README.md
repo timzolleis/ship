@@ -46,7 +46,7 @@ ship init --alias ep ...     # Non-interactive with flags
 ### Workspace Lifecycle
 
 ```bash
-ship create <project> [branch]     # Create or resume a workspace
+ship create <project> [branch]     # Create workspace (or open existing)
 ship create ep tim/ep-241          # Full example
 ship create ep                     # Interactive branch prompt
 
@@ -68,6 +68,7 @@ ship ls ep                         # List workspaces for a project
 4. Runs install, generate, and migrate commands
 5. Allocates a port and registers an HTTPS proxy route
 6. Registers the workspace in `~/.config/ship/workspaces.json`
+7. Opens the workspace in your editor (asks on first run, remembers preference)
 
 ### Dev Server
 
@@ -90,10 +91,17 @@ Run inside a workspace. Useful when the DB gets into a bad state.
 ### Open Things
 
 ```bash
-ship open                      # Open workspace in editor
+ship open                      # Open current workspace in editor
+ship open 241                  # Fuzzy match branch (substring search)
+ship open tim/ep-241           # Exact branch match
 ship open url                  # Open proxy URL in browser
 ship open db                   # Open psql session to workspace DB
+ship open tim/ep-241 url       # Open specific workspace's URL
 ```
+
+Branch matching tries exact match, then suffix (`*/241`), then substring (`241` anywhere in branch name).
+
+Editor detection finds the first available from: `$VISUAL`, `$EDITOR`, Zed, Cursor, VS Code, Sublime, nvim, vim, vi. On macOS, GUI editors are detected via `/Applications/` (works even if CLI shims aren't in PATH). The working editor is saved to config.
 
 ### Garbage Collection
 
@@ -234,7 +242,7 @@ All config lives in `~/.config/ship/`:
 
 | File | Purpose |
 |---|---|
-| `config.json` | Project definitions (alias, path, DB, commands, env) |
+| `config.json` | Project definitions, editor preference, auto-open setting |
 | `workspaces.json` | Active workspace registry |
 | `Caddyfile` | Proxy routes (managed by ship) |
 | `caddy-data/` | Caddy TLS certificates |
@@ -244,6 +252,8 @@ All config lives in `~/.config/ship/`:
 
 ```json
 {
+  "editor": "zed",
+  "autoOpenEditor": true,
   "projects": {
     "ep": {
       "path": "/Users/tim/IdeaProjects/elternportal",

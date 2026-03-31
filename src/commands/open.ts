@@ -4,6 +4,30 @@ import { Console, Effect } from "effect"
 import { ConfigService } from "../services/config.js"
 import * as Shell from "../services/shell.js"
 
+const detectEditor = (
+  executor: CommandExecutor.CommandExecutor
+): Effect.Effect<string, never, never> => {
+  const run = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>) =>
+    Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
+
+  // 1. Env vars
+  if (process.env.VISUAL) return Effect.succeed(process.env.VISUAL)
+  if (process.env.EDITOR) return Effect.succeed(process.env.EDITOR)
+
+  // 2. Probe common editors in preference order
+  const candidates = ["zed", "cursor", "code", "subl", "atom", "nvim", "vim"]
+  return Effect.gen(function* () {
+    for (const cmd of candidates) {
+      const found = yield* run(Shell.exec("which", [cmd])).pipe(
+        Effect.map(() => true),
+        Effect.catchAll(() => Effect.succeed(false))
+      )
+      if (found) return cmd
+    }
+    return "vi"
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
@@ -45,7 +69,7 @@ export const openCommand = Command.make(
       switch (target) {
         case "editor": {
           const shipConfig = yield* config.loadConfig()
-          const editor = shipConfig.editor ?? "code"
+          const editor = shipConfig.editor ?? (yield* detectEditor(executor))
           yield* Console.log(`  Opening in ${bold(editor)}...`)
           yield* run(Shell.exec(editor, [workspace.path]))
           break

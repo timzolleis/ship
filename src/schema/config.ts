@@ -78,6 +78,6 @@ export class ProjectConfig extends Schema.Class<ProjectConfig>("ProjectConfig")(
 // ---------------------------------------------------------------------------
 
 export class ShipConfig extends Schema.Class<ShipConfig>("ShipConfig")({
-  editor: Schema.optionalWith(Schema.String, { default: () => "code" }),
+  editor: Schema.optional(Schema.String),
   projects: Schema.Record({ key: Schema.String, value: ProjectConfig })
 }) {}

@@ -3,8 +3,12 @@ import { NodeContext, NodeRuntime } from "@effect/platform-node"
 import { Console, Effect, Layer } from "effect"
 import { createCommand } from "./commands/create.js"
 import { downCommand } from "./commands/down.js"
+import { gcCommand } from "./commands/gc.js"
 import { initCommand } from "./commands/init.js"
 import { listCommand } from "./commands/list.js"
+import { openCommand } from "./commands/open.js"
+import { resetCommand } from "./commands/reset.js"
+import { upCommand } from "./commands/up.js"
 import { proxyCommand } from "./commands/proxy/proxy.js"
 import { ConfigServiceLive } from "./services/config.js"
 import { ProxyServiceLive } from "./services/proxy.js"
@@ -33,7 +37,7 @@ const HELP = `
     ${blue("ls")}     [project]              List active workspaces
 
   ${bold("Dev Server")}
-    ${blue("up")}     [--open]               Start dev server + proxy ${dim("(coming soon)")}
+    ${blue("up")}     [--open]               Start dev server + proxy
 
   ${bold("Proxy")} ${dim("(HTTPS reverse proxy via Caddy)")}
     ${blue("proxy start")}                   Start proxy container
@@ -45,6 +49,11 @@ const HELP = `
     ${blue("proxy trust")}                   Trust CA in macOS keychain
     ${blue("proxy edit")}                    Open Caddyfile in $EDITOR
     ${blue("proxy next-port")}               Print next available port
+
+  ${bold("Utilities")}
+    ${blue("reset")}  [--fresh]              Reset workspace database
+    ${blue("open")}   [editor|url|db]        Open editor, browser, or psql
+    ${blue("gc")}     [--force] [--dry-run]  Clean up workspaces with merged PRs
 
   ${bold("Options")}
     --help, -h                    Show help for any command
@@ -62,7 +71,10 @@ const HELP = `
 const ship = Command.make("ship", {}, () => Console.log(HELP))
 
 const command = ship.pipe(
-  Command.withSubcommands([createCommand, downCommand, initCommand, listCommand, proxyCommand])
+  Command.withSubcommands([
+    createCommand, downCommand, gcCommand, initCommand,
+    listCommand, openCommand, resetCommand, upCommand, proxyCommand
+  ])
 )
 
 const cli = Command.run(command, {

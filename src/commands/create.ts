@@ -3,6 +3,8 @@ import { CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
 import { ProxyService } from "../services/proxy.js"
+import { detectEditor } from "./open.js"
+import { ShipConfig } from "../schema/config.js"
 import * as Git from "../services/git.js"
 import * as Database from "../services/database.js"
 import * as Env from "../services/env.js"
@@ -183,7 +185,30 @@ export const createCommand = Command.make(
         })
       )
 
+      // 13. Auto-open editor (ask first time, save preference)
       yield* Console.log("")
+      const shipConfig = yield* config.loadConfig()
+      let shouldOpen = shipConfig.autoOpenEditor
+
+      if (shouldOpen === undefined) {
+        shouldOpen = yield* Prompt.confirm({
+          message: "Open workspace in editor?",
+          initial: true
+        })
+        // Save preference for next time
+        const updated = new ShipConfig({
+          ...shipConfig,
+          autoOpenEditor: shouldOpen
+        })
+        yield* config.saveConfig(updated)
+      }
+
+      if (shouldOpen) {
+        const editor = shipConfig.editor ?? (yield* detectEditor(executor))
+        yield* Console.log(`  Opening in ${bold(editor)}...`)
+        yield* run(Shell.exec(editor, [worktreeDir])).pipe(Effect.catchAll(() => Effect.void))
+      }
+
       yield* Console.log(`  ${green("Ready.")}`)
       yield* Console.log("")
     }).pipe(

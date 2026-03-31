@@ -79,5 +79,7 @@ export class ProjectConfig extends Schema.Class<ProjectConfig>("ProjectConfig")(
 
 export class ShipConfig extends Schema.Class<ShipConfig>("ShipConfig")({
   editor: Schema.optional(Schema.String),
+  /** Auto-open editor after ship create. undefined = ask first time. */
+  autoOpenEditor: Schema.optional(Schema.Boolean),
   projects: Schema.Record({ key: Schema.String, value: ProjectConfig })
 }) {}

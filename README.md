@@ -69,6 +69,42 @@ ship ls ep                         # List workspaces for a project
 5. Allocates a port and registers an HTTPS proxy route
 6. Registers the workspace in `~/.config/ship/workspaces.json`
 
+### Dev Server
+
+```bash
+ship up                        # Start dev server + ensure proxy is running
+ship up --open                 # Also open browser
+```
+
+Run inside a workspace. Ensures the proxy container is running, the route is registered, then executes the configured dev command.
+
+### Database Reset
+
+```bash
+ship reset                     # Drop DB and re-clone from source
+ship reset --fresh             # Drop DB, create empty, run seed
+```
+
+Run inside a workspace. Useful when the DB gets into a bad state.
+
+### Open Things
+
+```bash
+ship open                      # Open workspace in editor
+ship open url                  # Open proxy URL in browser
+ship open db                   # Open psql session to workspace DB
+```
+
+### Garbage Collection
+
+```bash
+ship gc                        # Check all workspaces for merged PRs
+ship gc --force                # Auto-teardown all merged, no prompts
+ship gc --dry-run              # Just show what would be cleaned up
+```
+
+Uses `gh pr view` to check PR status. Prompts to tear down each workspace with a merged PR.
+
 ### HTTPS Proxy (replaces localproxy)
 
 Manages a Caddy Docker container for local HTTPS reverse proxying.

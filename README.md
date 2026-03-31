@@ -87,6 +87,111 @@ ship proxy edit                # Open Caddyfile in $EDITOR
 ship proxy next-port           # Print next available port
 ```
 
+## Architecture
+
+### How ship organizes things
+
+```
+~/.config/ship/                    # ship's home — all state lives here
+├── config.json                    # project definitions (created by `ship init`)
+├── workspaces.json                # registry of active workspaces
+├── Caddyfile                      # proxy routes (one block per workspace)
+├── caddy-data/                    # Caddy TLS certs + CA (auto-generated)
+│   └── caddy/pki/authorities/
+│       └── local/root.crt         # the CA cert you trust with `ship proxy trust`
+└── caddy-config/                  # Caddy runtime state
+```
+
+### What happens when you run `ship create ep tim/ep-241`
+
+Given a project `ep` pointing to `/Users/tim/IdeaProjects/elternportal`:
+
+```
+/Users/tim/IdeaProjects/
+├── elternportal/                  # main repo (where you ran `ship init`)
+│   ├── apps/dashboard/.env        # source .env (read, never modified)
+│   └── ...
+│
+└── elternportal-tim-ep-241/       # NEW — git worktree (sibling directory)
+    ├── apps/dashboard/.env        # PATCHED copy — different DB, different URLs
+    ├── packages/db/.env           # PATCHED copy
+    └── ...                        # full repo checkout on branch tim/ep-241
+```
+
+**Database** (inside Docker `postgres` container):
+```
+dashboard          # source DB (never modified)
+ep_tim_ep_241      # NEW — cloned from dashboard via pg_dump | psql
+```
+
+**Proxy** (Caddyfile gets a new block):
+```
+ep-tim-ep-241.localhost {
+    reverse_proxy host.docker.internal:5174
+}
+```
+
+**Workspace registry** (`workspaces.json` gets a new entry):
+```json
+{
+  "project": "ep",
+  "branch": "tim/ep-241",
+  "path": "/Users/tim/IdeaProjects/elternportal-tim-ep-241",
+  "port": 5174,
+  "dbName": "ep_tim_ep_241",
+  "proxyDomain": "ep-tim-ep-241.localhost",
+  "created": "2026-03-31"
+}
+```
+
+### Naming conventions
+
+Everything derives from the branch name and project alias:
+
+| Thing | Pattern | Example |
+|---|---|---|
+| Branch | as provided | `tim/ep-241` |
+| Worktree dir | `../{project}-{branch_slug}/` | `../elternportal-tim-ep-241/` |
+| Database | `{alias}_{branch_slug_safe}` | `ep_tim_ep_241` |
+| Proxy domain | `{alias}-{branch_slug}.localhost` | `ep-tim-ep-241.localhost` |
+| Port | auto-allocated (starts at 5174) | `5174` |
+
+Where `branch_slug` = slashes → hyphens (`tim/ep-241` → `tim-ep-241`) and `branch_slug_safe` = non-alphanumeric → underscores, lowercased.
+
+### .env patching
+
+When creating a workspace, ship copies `.env` files from the main repo to the worktree and rewrites specific variables. Which variables to rewrite is determined during `ship init` (auto-detected from `.localhost` domains and database URLs).
+
+| Original | Patched |
+|---|---|
+| `DATABASE_URL=postgres://dashboard:pw@localhost:5432/dashboard` | `DATABASE_URL=postgres://dashboard:pw@localhost:5432/ep_tim_ep_241` |
+| `BASE_URL=https://elternportal.localhost` | `BASE_URL=https://ep-tim-ep-241.localhost` |
+| `BETTER_AUTH_URL=https://elternportal.localhost` | `BETTER_AUTH_URL=https://ep-tim-ep-241.localhost` |
+
+All other env vars are copied as-is.
+
+### Proxy architecture
+
+Ship runs a **Caddy** Docker container (`ship-proxy`) that handles HTTPS termination with auto-generated certificates.
+
+```
+Browser → https://ep-tim-ep-241.localhost
+       → Caddy container (ports 80/443)
+       → reverse_proxy host.docker.internal:5174
+       → your dev server
+```
+
+The Caddy CA is self-signed. Run `ship proxy trust` once to add it to your macOS keychain so browsers accept the certs without warnings.
+
+### Lifecycle
+
+```
+ship init          →  writes ~/.config/ship/config.json
+ship create        →  creates worktree + DB + env + proxy route + workspaces.json entry
+ship down          →  removes proxy route + drops DB + removes worktree + deletes branch
+ship down --db-only →  only drops DB (useful for resetting state)
+```
+
 ## Configuration
 
 All config lives in `~/.config/ship/`:

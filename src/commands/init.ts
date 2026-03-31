@@ -10,15 +10,7 @@ import {
   EnvVarConfig,
   WorktreeConfig,
 } from "../schema/config.js"
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`
-const blue = (s: string) => `\x1b[34m${s}\x1b[0m`
+import { bold, dim, green, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
 // Options (all optional — missing = interactive prompt)
@@ -56,7 +48,6 @@ const findEnvFiles = (
     const entries = yield* fs.readDirectory(dir).pipe(Effect.catchAll(() => Effect.succeed([] as string[])))
 
     for (const entry of entries) {
-      // Skip common non-project dirs
       if (["node_modules", ".git", "dist", "build", ".next", ".cache", ".turbo"].includes(entry)) continue
 
       const fullPath = pathSvc.join(dir, entry)
@@ -67,7 +58,6 @@ const findEnvFiles = (
         const nested = yield* findEnvFiles(fullPath, root)
         results.push(...nested)
       } else if (entry === ".env") {
-        // Store as relative path from project root
         const relative = pathSvc.relative(root, fullPath)
         results.push(relative)
       }
@@ -258,7 +248,7 @@ export const initCommand = Command.make(
       yield* Console.log("")
     }).pipe(
       Effect.catchAll((e) =>
-        Console.error(`Error: ${"message" in e ? e.message : String(e)}`)
+        Console.error(`Error: ${e.message}`)
       )
     )
 )

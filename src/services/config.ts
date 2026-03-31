@@ -3,26 +3,25 @@ import type { PlatformError } from "@effect/platform/Error"
 import { Effect, Context, Layer, Schema, Option } from "effect"
 import { ShipConfig, ProjectConfig } from "../schema/config.js"
 import { Workspace, Workspaces } from "../schema/workspace.js"
+import { ProjectNotFoundError, InvalidConfigError } from "../errors.js"
 
 // ---------------------------------------------------------------------------
 // ConfigService
 // ---------------------------------------------------------------------------
 
-export type ConfigError = Error | PlatformError
-
 export class ConfigService extends Context.Tag("ConfigService")<
   ConfigService,
   {
     readonly configDir: () => string
-    readonly loadConfig: () => Effect.Effect<ShipConfig, ConfigError>
-    readonly saveConfig: (config: ShipConfig) => Effect.Effect<void, ConfigError>
-    readonly getProject: (alias: string) => Effect.Effect<ProjectConfig, ConfigError>
-    readonly addProject: (alias: string, project: ProjectConfig) => Effect.Effect<void, ConfigError>
-    readonly loadWorkspaces: () => Effect.Effect<Workspaces, ConfigError>
-    readonly saveWorkspaces: (workspaces: Workspaces) => Effect.Effect<void, ConfigError>
-    readonly addWorkspace: (workspace: Workspace) => Effect.Effect<void, ConfigError>
-    readonly removeWorkspace: (project: string, branch: string) => Effect.Effect<void, ConfigError>
-    readonly findWorkspace: (project: string, branch: string) => Effect.Effect<Option.Option<Workspace>, ConfigError>
+    readonly loadConfig: () => Effect.Effect<ShipConfig, InvalidConfigError | PlatformError>
+    readonly saveConfig: (config: ShipConfig) => Effect.Effect<void, InvalidConfigError | PlatformError>
+    readonly getProject: (alias: string) => Effect.Effect<ProjectConfig, ProjectNotFoundError | InvalidConfigError | PlatformError>
+    readonly addProject: (alias: string, project: ProjectConfig) => Effect.Effect<void, InvalidConfigError | PlatformError>
+    readonly loadWorkspaces: () => Effect.Effect<Workspaces, InvalidConfigError | PlatformError>
+    readonly saveWorkspaces: (workspaces: Workspaces) => Effect.Effect<void, InvalidConfigError | PlatformError>
+    readonly addWorkspace: (workspace: Workspace) => Effect.Effect<void, InvalidConfigError | PlatformError>
+    readonly removeWorkspace: (project: string, branch: string) => Effect.Effect<void, InvalidConfigError | PlatformError>
+    readonly findWorkspace: (project: string, branch: string) => Effect.Effect<Option.Option<Workspace>, InvalidConfigError | PlatformError>
   }
 >() {}
 
@@ -40,30 +39,28 @@ export const ConfigServiceLive = Layer.effect(
     const ensureDir = (): Effect.Effect<void, PlatformError> =>
       fs.makeDirectory(configDir, { recursive: true })
 
-    const loadConfig = (): Effect.Effect<ShipConfig, ConfigError> =>
+    const loadConfig = (): Effect.Effect<ShipConfig, InvalidConfigError | PlatformError> =>
       Effect.gen(function* () {
         yield* ensureDir()
         const exists = yield* fs.exists(configPath)
-        if (!exists) {
-          return new ShipConfig({ projects: {} })
-        }
+        if (!exists) return new ShipConfig({ projects: {} })
         const raw = yield* fs.readFileString(configPath)
         const json = JSON.parse(raw)
         return yield* Schema.decodeUnknown(ShipConfig)(json).pipe(
-          Effect.mapError((e) => new Error(`Invalid config: ${String(e)}`))
+          Effect.mapError((e) => new InvalidConfigError({ detail: String(e) }))
         )
       })
 
-    const saveConfig = (config: ShipConfig): Effect.Effect<void, ConfigError> =>
+    const saveConfig = (config: ShipConfig): Effect.Effect<void, InvalidConfigError | PlatformError> =>
       Effect.gen(function* () {
         yield* ensureDir()
         const encoded = yield* Schema.encode(ShipConfig)(config).pipe(
-          Effect.mapError((e) => new Error(`Failed to encode config: ${String(e)}`))
+          Effect.mapError((e) => new InvalidConfigError({ detail: String(e) }))
         )
         yield* fs.writeFileString(configPath, JSON.stringify(encoded, null, 2) + "\n")
       })
 
-    const loadWorkspaces = (): Effect.Effect<Workspaces, ConfigError> =>
+    const loadWorkspaces = (): Effect.Effect<Workspaces, InvalidConfigError | PlatformError> =>
       Effect.gen(function* () {
         yield* ensureDir()
         const exists = yield* fs.exists(workspacesPath)
@@ -71,35 +68,31 @@ export const ConfigServiceLive = Layer.effect(
         const raw = yield* fs.readFileString(workspacesPath)
         const json = JSON.parse(raw)
         return yield* Schema.decodeUnknown(Workspaces)(json).pipe(
-          Effect.mapError((e) => new Error(`Invalid workspaces: ${String(e)}`))
+          Effect.mapError((e) => new InvalidConfigError({ detail: String(e) }))
         )
       })
 
-    const saveWorkspaces = (workspaces: Workspaces): Effect.Effect<void, ConfigError> =>
+    const saveWorkspaces = (workspaces: Workspaces): Effect.Effect<void, InvalidConfigError | PlatformError> =>
       Effect.gen(function* () {
         yield* ensureDir()
         const encoded = yield* Schema.encode(Workspaces)(workspaces).pipe(
-          Effect.mapError((e) => new Error(`Failed to encode workspaces: ${String(e)}`))
+          Effect.mapError((e) => new InvalidConfigError({ detail: String(e) }))
         )
         yield* fs.writeFileString(workspacesPath, JSON.stringify(encoded, null, 2) + "\n")
       })
 
-    return {
+    return ConfigService.of({
       configDir: () => configDir,
       loadConfig,
       saveConfig,
-      getProject: (alias: string) =>
+      getProject: (alias) =>
         Effect.gen(function* () {
           const config = yield* loadConfig()
           const project = config.projects[alias]
-          if (!project) {
-            return yield* Effect.fail(
-              new Error(`Project '${alias}' not found. Run 'ship init' or 'ship add' first.`)
-            )
-          }
+          if (!project) return yield* new ProjectNotFoundError({ alias })
           return project
         }),
-      addProject: (alias: string, project: ProjectConfig) =>
+      addProject: (alias, project) =>
         Effect.gen(function* () {
           const config = yield* loadConfig()
           const updated = new ShipConfig({
@@ -110,16 +103,15 @@ export const ConfigServiceLive = Layer.effect(
         }),
       loadWorkspaces,
       saveWorkspaces,
-      addWorkspace: (workspace: Workspace) =>
+      addWorkspace: (workspace) =>
         Effect.gen(function* () {
           const workspaces = yield* loadWorkspaces()
-          // Replace if exists, otherwise append
           const filtered = workspaces.filter(
             (w) => !(w.project === workspace.project && w.branch === workspace.branch)
           )
           yield* saveWorkspaces([...filtered, workspace])
         }),
-      removeWorkspace: (project: string, branch: string) =>
+      removeWorkspace: (project, branch) =>
         Effect.gen(function* () {
           const workspaces = yield* loadWorkspaces()
           const filtered = workspaces.filter(
@@ -127,7 +119,7 @@ export const ConfigServiceLive = Layer.effect(
           )
           yield* saveWorkspaces(filtered)
         }),
-      findWorkspace: (project: string, branch: string) =>
+      findWorkspace: (project, branch) =>
         Effect.gen(function* () {
           const workspaces = yield* loadWorkspaces()
           const found = workspaces.find(
@@ -135,6 +127,6 @@ export const ConfigServiceLive = Layer.effect(
           )
           return found ? Option.some(found) : Option.none()
         })
-    }
+    })
   })
 )

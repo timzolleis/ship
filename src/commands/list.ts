@@ -1,16 +1,7 @@
-import { Args, Command, Options } from "@effect/cli"
+import { Args, Command } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const blue = (s: string) => `\x1b[34m${s}\x1b[0m`
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`
+import { bold, dim, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
 // ship ls [project]
@@ -73,7 +64,7 @@ export const listCommand = Command.make(
       yield* Console.log("")
     }).pipe(
       Effect.catchAll((e) =>
-        Console.error(`Error: ${"message" in e ? e.message : String(e)}`)
+        Console.error(`Error: ${e.message}`)
       )
     )
 )

@@ -1,20 +1,10 @@
 import { Args, Command, Options, Prompt } from "@effect/cli"
-import { CommandExecutor } from "@effect/platform"
 import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
 import { ProxyService } from "../services/proxy.js"
-import * as Git from "../services/git.js"
-import * as Database from "../services/database.js"
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`
+import { GitService } from "../services/git.js"
+import { DatabaseService } from "../services/database.js"
+import { bold, green, red, yellow } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
 // ship down [project] [branch] [--force] [--db-only]
@@ -32,10 +22,8 @@ export const downCommand = Command.make(
     Effect.gen(function* () {
       const config = yield* ConfigService
       const proxy = yield* ProxyService
-      const executor = yield* CommandExecutor.CommandExecutor
-
-      const run = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>) =>
-        Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
+      const git = yield* GitService
+      const db = yield* DatabaseService
 
       // Resolve project and branch
       let project: string
@@ -45,7 +33,6 @@ export const downCommand = Command.make(
         project = projectOpt.value
         branch = branchOpt.value
       } else {
-        // Try to detect from current worktree
         const workspaces = yield* config.loadWorkspaces()
         const cwd = process.cwd()
         const current = workspaces.find((w) => cwd.startsWith(w.path))
@@ -53,12 +40,28 @@ export const downCommand = Command.make(
         if (current) {
           project = current.project
           branch = current.branch
-        } else if (Option.isSome(projectOpt)) {
-          project = projectOpt.value
-          branch = yield* Prompt.text({ message: "Branch to tear down:" })
+        } else if (workspaces.length > 0) {
+          const filtered = Option.isSome(projectOpt)
+            ? workspaces.filter((w) => w.project === projectOpt.value)
+            : workspaces
+
+          if (filtered.length === 0) {
+            yield* Console.log(`  ${red("✗")} No workspaces found for project ${bold(Option.getOrElse(projectOpt, () => "?"))}`)
+            return
+          }
+
+          const selected = yield* Prompt.select({
+            message: "Select workspace to tear down",
+            choices: filtered.map((w) => ({
+              title: `${w.project}  ${w.branch}`,
+              value: w,
+              description: w.proxyDomain
+            }))
+          })
+          project = selected.project
+          branch = selected.branch
         } else {
-          yield* Console.log(`  ${red("✗")} Not inside a workspace. Specify project and branch.`)
-          yield* Console.log(`  Usage: ship down <project> <branch>`)
+          yield* Console.log(`  ${red("✗")} No workspaces found.`)
           return
         }
       }
@@ -94,9 +97,7 @@ export const downCommand = Command.make(
 
       // 2. Drop database
       const projectConfig = yield* config.getProject(project)
-      yield* run(
-        Database.dropDb(projectConfig.database.container, projectConfig.database.user, workspace.dbName)
-      ).pipe(
+      yield* db.dropDb(projectConfig.database.container, projectConfig.database.user, workspace.dbName).pipe(
         Effect.tap(() => Console.log(`  ${green("✓")} Database        ${workspace.dbName} dropped`)),
         Effect.catchAll(() =>
           Console.log(`  ${yellow("⚠")} Database        ${workspace.dbName} could not be dropped`)
@@ -105,7 +106,7 @@ export const downCommand = Command.make(
 
       if (!dbOnly) {
         // 3. Remove worktree
-        yield* run(Git.worktreeRemove(workspace.path, force)).pipe(
+        yield* git.worktreeRemove(workspace.path, force).pipe(
           Effect.tap(() => Console.log(`  ${green("✓")} Worktree        ${workspace.path} removed`)),
           Effect.catchAll(() =>
             Console.log(`  ${yellow("⚠")} Worktree        ${workspace.path} not found`)
@@ -113,7 +114,7 @@ export const downCommand = Command.make(
         )
 
         // 4. Delete branch
-        yield* run(Git.deleteBranch(branch)).pipe(
+        yield* git.deleteBranch(branch).pipe(
           Effect.tap(() => Console.log(`  ${green("✓")} Branch          ${branch} deleted`)),
           Effect.catchAll(() =>
             Console.log(`  ${yellow("⚠")} Branch          ${branch} not found`)
@@ -129,7 +130,7 @@ export const downCommand = Command.make(
       yield* Console.log("")
     }).pipe(
       Effect.catchAll((e) =>
-        Console.error(`\n  ${red("Error:")} ${"message" in e ? e.message : String(e)}\n`)
+        Console.error(`\n  ${red("Error:")} ${e.message}\n`)
       )
     )
 )

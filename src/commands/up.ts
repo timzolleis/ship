@@ -1,19 +1,9 @@
 import { Command, Options } from "@effect/cli"
-import { CommandExecutor } from "@effect/platform"
-import { Console, Effect, Option } from "effect"
+import { Console, Effect } from "effect"
 import { ConfigService } from "../services/config.js"
 import { ProxyService } from "../services/proxy.js"
-import * as Shell from "../services/shell.js"
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`
-const blue = (s: string) => `\x1b[34m${s}\x1b[0m`
+import { ShellService } from "../services/shell.js"
+import { bold, dim, green, red, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
 // ship up [--open]
@@ -28,10 +18,7 @@ export const upCommand = Command.make(
     Effect.gen(function* () {
       const config = yield* ConfigService
       const proxy = yield* ProxyService
-      const executor = yield* CommandExecutor.CommandExecutor
-
-      const run = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>) =>
-        Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
+      const shell = yield* ShellService
 
       // Find current workspace from cwd
       const workspaces = yield* config.loadWorkspaces()
@@ -68,23 +55,23 @@ export const upCommand = Command.make(
 
       const resolvedCmd = devCmd.replace(/\{port\}/g, String(workspace.port))
 
+      // Open browser after a short delay (in a background fiber)
       if (open) {
-        // Open browser after a short delay
-        setTimeout(() => {
-          import("child_process").then((cp) => {
-            cp.exec(`open https://${workspace.proxyDomain}`)
-          })
-        }, 2000)
+        yield* shell.exec("open", [`https://${workspace.proxyDomain}`]).pipe(
+          Effect.delay("2 seconds"),
+          Effect.catchAll(() => Effect.void),
+          Effect.fork
+        )
       }
 
       yield* Console.log(`  ${dim(`Running: ${resolvedCmd}`)}`)
       yield* Console.log("")
 
-      // exec the dev command (replaces this process)
-      yield* run(Shell.execInDir(workspace.path, resolvedCmd))
+      // Run the dev command (blocks until it exits)
+      yield* shell.execInDir(workspace.path, resolvedCmd)
     }).pipe(
       Effect.catchAll((e) =>
-        Console.error(`\n  ${red("Error:")} ${"message" in e ? e.message : String(e)}\n`)
+        Console.error(`\n  ${red("Error:")} ${e.message}\n`)
       )
     )
 )

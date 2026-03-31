@@ -1,62 +1,59 @@
-import { CommandExecutor } from "@effect/platform"
 import type { PlatformError } from "@effect/platform/Error"
-import { Effect } from "effect"
-import * as Shell from "./shell.js"
+import { Context, Effect, Layer } from "effect"
+import { ShellService } from "./shell.js"
 
 // ---------------------------------------------------------------------------
-// Database operations via docker exec
+// DatabaseService
 // ---------------------------------------------------------------------------
 
-export type DbError = PlatformError
+export class DatabaseService extends Context.Tag("DatabaseService")<
+  DatabaseService,
+  {
+    readonly createDb: (container: string, user: string, dbName: string) => Effect.Effect<void, PlatformError>
+    readonly dropDb: (container: string, user: string, dbName: string) => Effect.Effect<void, PlatformError>
+    readonly cloneDb: (container: string, user: string, sourceDb: string, targetDb: string) => Effect.Effect<void, PlatformError>
+    readonly dbExists: (container: string, user: string, dbName: string) => Effect.Effect<boolean, PlatformError>
+    readonly isContainerRunning: (container: string) => Effect.Effect<boolean>
+  }
+>() {}
 
-const dockerExec = (container: string, args: ReadonlyArray<string>) =>
-  Shell.exec("docker", ["exec", container, ...args])
-
-export const createDb = (
-  container: string,
-  user: string,
-  dbName: string
-): Effect.Effect<void, DbError, CommandExecutor.CommandExecutor> =>
-  dockerExec(container, ["createdb", "-U", user, dbName]).pipe(Effect.asVoid)
-
-export const dropDb = (
-  container: string,
-  user: string,
-  dbName: string
-): Effect.Effect<void, DbError, CommandExecutor.CommandExecutor> =>
-  dockerExec(container, ["dropdb", "--if-exists", "-U", user, dbName]).pipe(Effect.asVoid)
-
-export const cloneDb = (
-  container: string,
-  user: string,
-  sourceDb: string,
-  targetDb: string
-): Effect.Effect<void, DbError, CommandExecutor.CommandExecutor> =>
+export const DatabaseServiceLive = Layer.effect(
+  DatabaseService,
   Effect.gen(function* () {
-    yield* createDb(container, user, targetDb)
-    // pg_dump source | psql target
-    yield* Shell.exec("docker", [
-      "exec", container, "bash", "-c",
-      `pg_dump -U ${user} ${sourceDb} | psql -U ${user} ${targetDb}`
-    ])
-  }).pipe(Effect.asVoid)
+    const shell = yield* ShellService
 
-export const dbExists = (
-  container: string,
-  user: string,
-  dbName: string
-): Effect.Effect<boolean, DbError, CommandExecutor.CommandExecutor> =>
-  dockerExec(container, ["psql", "-U", user, "-lqt"]).pipe(
-    Effect.map((r) =>
-      r.stdout.split("\n").some((line) => line.trim().startsWith(dbName))
-    ),
-    Effect.catchAll(() => Effect.succeed(false))
-  )
+    const dockerExec = (container: string, args: ReadonlyArray<string>) =>
+      shell.exec("docker", ["exec", container, ...args])
 
-export const isContainerRunning = (
-  container: string
-): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
-  Shell.exec("docker", ["exec", container, "pg_isready", "-q"]).pipe(
-    Effect.map(() => true),
-    Effect.catchAll(() => Effect.succeed(false))
-  )
+    return DatabaseService.of({
+      createDb: (container, user, dbName) =>
+        dockerExec(container, ["createdb", "-U", user, dbName]).pipe(Effect.asVoid),
+
+      dropDb: (container, user, dbName) =>
+        dockerExec(container, ["dropdb", "--if-exists", "-U", user, dbName]).pipe(Effect.asVoid),
+
+      cloneDb: (container, user, sourceDb, targetDb) =>
+        Effect.gen(function* () {
+          yield* dockerExec(container, ["createdb", "-U", user, targetDb])
+          yield* shell.exec("docker", [
+            "exec", container, "bash", "-c",
+            `pg_dump -U ${user} ${sourceDb} | psql -U ${user} ${targetDb}`
+          ])
+        }).pipe(Effect.asVoid),
+
+      dbExists: (container, user, dbName) =>
+        dockerExec(container, ["psql", "-U", user, "-lqt"]).pipe(
+          Effect.map((r) =>
+            r.stdout.split("\n").some((line) => line.trim().startsWith(dbName))
+          ),
+          Effect.catchAll(() => Effect.succeed(false))
+        ),
+
+      isContainerRunning: (container) =>
+        shell.exec("docker", ["exec", container, "pg_isready", "-q"]).pipe(
+          Effect.map(() => true),
+          Effect.catchAll(() => Effect.succeed(false))
+        )
+    })
+  })
+)

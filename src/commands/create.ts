@@ -1,28 +1,19 @@
 import { Args, Command, Prompt } from "@effect/cli"
-import { CommandExecutor, FileSystem, Path } from "@effect/platform"
+import { Path } from "@effect/platform"
 import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
 import { ProxyService } from "../services/proxy.js"
-import { detectEditor } from "./open.js"
+import { GitService } from "../services/git.js"
+import { DatabaseService } from "../services/database.js"
+import { ShellService } from "../services/shell.js"
+import { EditorService } from "../services/editor.js"
 import { ShipConfig } from "../schema/config.js"
-import * as Git from "../services/git.js"
-import * as Database from "../services/database.js"
-import * as Env from "../services/env.js"
-import * as Shell from "../services/shell.js"
 import { Workspace } from "../schema/workspace.js"
+import * as Env from "../services/env.js"
+import { bold, dim, green, red, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`
-const blue = (s: string) => `\x1b[34m${s}\x1b[0m`
-
-// ---------------------------------------------------------------------------
-// Slug helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
 const toBranchSlug = (branch: string) => branch.replace(/\//g, "-")
@@ -50,7 +41,7 @@ const abbreviateValue = (value: string): string => {
 }
 
 // ---------------------------------------------------------------------------
-// ship <project> [branch]
+// ship create <project> [branch]
 // ---------------------------------------------------------------------------
 
 const projectArg = Args.text({ name: "project" })
@@ -63,11 +54,11 @@ export const createCommand = Command.make(
     Effect.gen(function* () {
       const config = yield* ConfigService
       const proxy = yield* ProxyService
+      const git = yield* GitService
+      const db = yield* DatabaseService
+      const shell = yield* ShellService
+      const editor = yield* EditorService
       const pathSvc = yield* Path.Path
-      const executor = yield* CommandExecutor.CommandExecutor
-
-      const run = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>) =>
-        Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
 
       // 1. Resolve project config
       const projectConfig = yield* config.getProject(project)
@@ -84,6 +75,14 @@ export const createCommand = Command.make(
         yield* Console.log(`  Already exists: ${bold(branch)} in ${dim(existing.value.path)}`)
         yield* Console.log(`  Proxy: ${blue(`https://${existing.value.proxyDomain}`)} → :${existing.value.port}`)
         yield* Console.log("")
+
+        const shouldOpen = yield* Prompt.confirm({
+          message: "Open in editor?",
+          initial: true
+        })
+        if (shouldOpen) {
+          yield* editor.open(existing.value.path)
+        }
         return
       }
 
@@ -91,7 +90,6 @@ export const createCommand = Command.make(
       const branchSlug = toBranchSlug(branch)
       const branchSlugSafe = toBranchSlugSafe(branch)
       const vars = { branch_slug: branchSlug, branch_slug_safe: branchSlugSafe, project }
-
       const worktreeDir = pathSvc.resolve(
         projectConfig.path,
         resolvePattern(projectConfig.worktree.dirPattern, vars)
@@ -102,26 +100,22 @@ export const createCommand = Command.make(
       yield* Console.log("")
 
       // 5. Create git worktree
-      yield* run(Git.worktreeAdd(worktreeDir, branch))
+      yield* git.worktreeAdd(worktreeDir, branch)
       yield* Console.log(`  ${green("✓")} Branch         ${bold(branch)}`)
       yield* Console.log(`  ${green("✓")} Worktree       ${dim(worktreeDir)}`)
 
       // 6. Clone database
-      const containerRunning = yield* run(
-        Database.isContainerRunning(projectConfig.database.container)
-      )
+      const containerRunning = yield* db.isContainerRunning(projectConfig.database.container)
       if (!containerRunning) {
         yield* Console.log(`  ${red("✗")} Database container '${projectConfig.database.container}' is not running.`)
         yield* Console.log(`    Start it first, then run this command again.`)
         return
       }
-      yield* run(
-        Database.cloneDb(
-          projectConfig.database.container,
-          projectConfig.database.user,
-          projectConfig.database.source,
-          dbName
-        )
+      yield* db.cloneDb(
+        projectConfig.database.container,
+        projectConfig.database.user,
+        projectConfig.database.source,
+        dbName
       )
       yield* Console.log(`  ${green("✓")} Database       ${bold(dbName)} ${dim(`(cloned from ${projectConfig.database.source})`)}`)
 
@@ -150,19 +144,19 @@ export const createCommand = Command.make(
       if (projectConfig.commands.install) {
         yield* Console.log("")
         yield* Console.log(`  Installing dependencies...`)
-        yield* run(Shell.execInDir(worktreeDir, projectConfig.commands.install))
+        yield* shell.execInDir(worktreeDir, projectConfig.commands.install)
         yield* Console.log(`  ${green("✓")} Dependencies   installed`)
       }
 
       // 9. Generate (e.g., Prisma client)
       if (projectConfig.commands.generate) {
-        yield* run(Shell.execInDir(worktreeDir, projectConfig.commands.generate))
+        yield* shell.execInDir(worktreeDir, projectConfig.commands.generate)
       }
 
-      // 10. Run migrations (patched .env already has the correct DATABASE_URL)
+      // 10. Run migrations
       if (projectConfig.commands.migrate) {
         yield* Console.log(`  Running migrations...`)
-        yield* run(Shell.execInDir(worktreeDir, projectConfig.commands.migrate))
+        yield* shell.execInDir(worktreeDir, projectConfig.commands.migrate)
         yield* Console.log(`  ${green("✓")} Migrations     applied`)
       }
 
@@ -185,7 +179,7 @@ export const createCommand = Command.make(
         })
       )
 
-      // 13. Auto-open editor (ask first time, save preference)
+      // 13. Auto-open editor
       yield* Console.log("")
       const shipConfig = yield* config.loadConfig()
       let shouldOpen = shipConfig.autoOpenEditor
@@ -195,25 +189,18 @@ export const createCommand = Command.make(
           message: "Open workspace in editor?",
           initial: true
         })
-        // Save preference for next time
-        const updated = new ShipConfig({
-          ...shipConfig,
-          autoOpenEditor: shouldOpen
-        })
-        yield* config.saveConfig(updated)
+        yield* config.saveConfig(new ShipConfig({ ...shipConfig, autoOpenEditor: shouldOpen }))
       }
 
       if (shouldOpen) {
-        const editor = shipConfig.editor ?? (yield* detectEditor(executor))
-        yield* Console.log(`  Opening in ${bold(editor)}...`)
-        yield* run(Shell.exec(editor, [worktreeDir])).pipe(Effect.catchAll(() => Effect.void))
+        yield* editor.open(worktreeDir)
       }
 
       yield* Console.log(`  ${green("Ready.")}`)
       yield* Console.log("")
     }).pipe(
       Effect.catchAll((e) =>
-        Console.error(`\n  ${red("Error:")} ${"message" in e ? e.message : String(e)}\n`)
+        Console.error(`\n  ${red("Error:")} ${e.message}\n`)
       )
     )
 )

@@ -10,16 +10,17 @@ import { openCommand } from "./commands/open.js"
 import { resetCommand } from "./commands/reset.js"
 import { upCommand } from "./commands/up.js"
 import { proxyCommand } from "./commands/proxy/proxy.js"
+import { ShellServiceLive } from "./services/shell.js"
+import { GitServiceLive } from "./services/git.js"
+import { DatabaseServiceLive } from "./services/database.js"
 import { ConfigServiceLive } from "./services/config.js"
 import { ProxyServiceLive } from "./services/proxy.js"
+import { EditorServiceLive } from "./services/editor.js"
+import { bold, dim, blue } from "./fmt.js"
 
 // ---------------------------------------------------------------------------
-// Formatting
+// Help text
 // ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const blue = (s: string) => `\x1b[34m${s}\x1b[0m`
 
 const HELP = `
   ${bold("ship")} — project-aware worktree + proxy manager
@@ -67,7 +68,10 @@ const HELP = `
     ${dim("$")} ship proxy start                  ${dim("# start HTTPS proxy")}
 `
 
-// ship — the root command
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
 const ship = Command.make("ship", {}, () => Console.log(HELP))
 
 const command = ship.pipe(
@@ -82,11 +86,34 @@ const cli = Command.run(command, {
   version: "0.1.0"
 })
 
+// ---------------------------------------------------------------------------
+// Layer composition
+// ---------------------------------------------------------------------------
+
+const ShellLive = ShellServiceLive.pipe(Layer.provide(NodeContext.layer))
+const GitLive = GitServiceLive.pipe(Layer.provide(ShellLive))
+const DatabaseLive = DatabaseServiceLive.pipe(Layer.provide(ShellLive))
+const ConfigLive = ConfigServiceLive.pipe(Layer.provide(NodeContext.layer))
+const ProxyLive = ProxyServiceLive.pipe(
+  Layer.provide(Layer.merge(NodeContext.layer, ShellLive))
+)
+const EditorLive = EditorServiceLive.pipe(
+  Layer.provide(Layer.mergeAll(NodeContext.layer, ShellLive, ConfigLive))
+)
+
 const MainLayer = Layer.mergeAll(
   NodeContext.layer,
-  ProxyServiceLive.pipe(Layer.provide(NodeContext.layer)),
-  ConfigServiceLive.pipe(Layer.provide(NodeContext.layer))
+  ShellLive,
+  GitLive,
+  DatabaseLive,
+  ConfigLive,
+  ProxyLive,
+  EditorLive
 )
+
+// ---------------------------------------------------------------------------
+// Run
+// ---------------------------------------------------------------------------
 
 Effect.suspend(() => cli(process.argv)).pipe(
   Effect.provide(MainLayer),

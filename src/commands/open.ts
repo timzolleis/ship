@@ -1,45 +1,11 @@
 import { Args, Command, Prompt } from "@effect/cli"
-import { CommandExecutor } from "@effect/platform"
 import type { Terminal } from "@effect/platform/Terminal"
 import { Console, Effect } from "effect"
 import { ConfigService } from "../services/config.js"
+import { EditorService } from "../services/editor.js"
+import { ShellService } from "../services/shell.js"
 import type { Workspace } from "../schema/workspace.js"
-import * as Shell from "../services/shell.js"
-
-// ---------------------------------------------------------------------------
-// Editor detection
-// ---------------------------------------------------------------------------
-
-export const detectEditor = (
-  executor: CommandExecutor.CommandExecutor
-): Effect.Effect<string, never, never> => {
-  const run = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>) =>
-    Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
-
-  if (process.env.VISUAL) return Effect.succeed(process.env.VISUAL)
-  if (process.env.EDITOR) return Effect.succeed(process.env.EDITOR)
-
-  const candidates = ["zed", "cursor", "code", "subl", "nvim", "vim"]
-  return Effect.gen(function* () {
-    for (const cmd of candidates) {
-      const found = yield* run(Shell.exec("which", [cmd])).pipe(
-        Effect.map(() => true),
-        Effect.catchAll(() => Effect.succeed(false))
-      )
-      if (found) return cmd
-    }
-    return "vi"
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const blue = (s: string) => `\x1b[34m${s}\x1b[0m`
+import { bold, red, dim } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
 // Resolve workspace: from cwd, branch arg, or interactive picker
@@ -56,9 +22,11 @@ const resolveWorkspace = (
 
     // 1. If arg looks like a branch name (not a target keyword), find by branch
     if (arg && !TARGETS.includes(arg as any)) {
-      const match = workspaces.find((w) =>
-        w.branch === arg || w.branch.endsWith(`/${arg}`)
-      )
+      // Exact match, then suffix match, then substring match
+      const match =
+        workspaces.find((w) => w.branch === arg) ??
+        workspaces.find((w) => w.branch.endsWith(`/${arg}`)) ??
+        workspaces.find((w) => w.branch.includes(arg))
       if (match) return match
       return yield* Effect.fail(
         new Error(`No workspace found for branch '${arg}'. Run 'ship ls' to see active workspaces.`)
@@ -89,13 +57,6 @@ const resolveWorkspace = (
 
 // ---------------------------------------------------------------------------
 // ship open [branch-or-target] [target]
-//
-// Examples:
-//   ship open                  → picker (or current), open editor
-//   ship open tim/ep-241       → find workspace, open editor
-//   ship open url              → current workspace, open browser
-//   ship open tim/ep-241 url   → find workspace, open browser
-//   ship open db               → current workspace, open psql
 // ---------------------------------------------------------------------------
 
 const firstArg = Args.text({ name: "branch-or-target" }).pipe(Args.optional)
@@ -107,10 +68,8 @@ export const openCommand = Command.make(
   ({ first, second }) =>
     Effect.gen(function* () {
       const config = yield* ConfigService
-      const executor = yield* CommandExecutor.CommandExecutor
-
-      const run = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>) =>
-        Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
+      const editor = yield* EditorService
+      const shell = yield* ShellService
 
       const workspaces = yield* config.loadWorkspaces()
 
@@ -122,10 +81,8 @@ export const openCommand = Command.make(
       let target: string = "editor"
 
       if (firstVal && TARGETS.includes(firstVal as any)) {
-        // `ship open url`
         target = firstVal
       } else if (firstVal) {
-        // `ship open tim/ep-241` or `ship open tim/ep-241 url`
         branchArg = firstVal
         if (secondVal) target = secondVal
       }
@@ -135,25 +92,23 @@ export const openCommand = Command.make(
 
       switch (target) {
         case "editor": {
-          const shipConfig = yield* config.loadConfig()
-          const editor = shipConfig.editor ?? (yield* detectEditor(executor))
-          yield* Console.log(`  Opening ${bold(workspace.branch)} in ${bold(editor)}...`)
-          yield* run(Shell.exec(editor, [workspace.path]))
+          yield* Console.log(`  Opening ${bold(workspace.branch)}...`)
+          yield* editor.open(workspace.path)
           break
         }
         case "url": {
           const url = `https://${workspace.proxyDomain}`
           yield* Console.log(`  Opening ${bold(url)}...`)
-          yield* run(Shell.exec("open", [url]))
+          yield* shell.exec("open", [url])
           break
         }
         case "db": {
-          const db = projectConfig.database
+          const dbConfig = projectConfig.database
           yield* Console.log(`  Connecting to ${bold(workspace.dbName)}...`)
-          yield* run(Shell.execInteractive("docker", [
-            "exec", "-it", db.container,
-            "psql", "-U", db.user, workspace.dbName
-          ]))
+          yield* shell.execInteractive("docker", [
+            "exec", "-it", dbConfig.container,
+            "psql", "-U", dbConfig.user, workspace.dbName
+          ])
           break
         }
         default:
@@ -161,7 +116,7 @@ export const openCommand = Command.make(
       }
     }).pipe(
       Effect.catchAll((e) =>
-        Console.error(`\n  ${red("Error:")} ${"message" in e ? e.message : String(e)}\n`)
+        Console.error(`\n  ${red("Error:")} ${e.message}\n`)
       )
     )
 )

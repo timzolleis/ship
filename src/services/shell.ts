@@ -1,9 +1,9 @@
 import { Command as PlatformCommand, CommandExecutor } from "@effect/platform"
 import type { PlatformError } from "@effect/platform/Error"
-import { Effect } from "effect"
+import { Context, Effect, Layer } from "effect"
 
 // ---------------------------------------------------------------------------
-// ShellService — functions for child process execution
+// ShellService
 // ---------------------------------------------------------------------------
 
 export interface ExecResult {
@@ -12,43 +12,53 @@ export interface ExecResult {
   readonly exitCode: number
 }
 
-/** Run a command and capture stdout. Fails on non-zero exit. */
-export const exec = (
-  command: string,
-  args: ReadonlyArray<string>
-): Effect.Effect<ExecResult, PlatformError, CommandExecutor.CommandExecutor> => {
-  const proc = PlatformCommand.make(command, ...args)
-  return PlatformCommand.string(proc).pipe(
-    Effect.map((stdout) => ({ stdout, stderr: "", exitCode: 0 }) as ExecResult)
-  )
-}
-
-/** Run a command that inherits stdio (interactive). */
-export const execInteractive = (
-  command: string,
-  args: ReadonlyArray<string>
-): Effect.Effect<void, PlatformError, CommandExecutor.CommandExecutor> => {
-  const proc = PlatformCommand.make(command, ...args).pipe(
-    PlatformCommand.stdin("inherit"),
-    PlatformCommand.stdout("inherit"),
-    PlatformCommand.stderr("inherit")
-  )
-  return PlatformCommand.exitCode(proc).pipe(Effect.asVoid)
-}
-
-/** Run a shell command string in a specific directory, inheriting stdio. */
-export const execInDir = (
-  cwd: string,
-  command: string,
-  envOverrides?: Record<string, string>
-): Effect.Effect<void, PlatformError, CommandExecutor.CommandExecutor> => {
-  let proc = PlatformCommand.make("sh", "-c", command).pipe(
-    PlatformCommand.workingDirectory(cwd),
-    PlatformCommand.stdout("inherit"),
-    PlatformCommand.stderr("inherit")
-  )
-  if (envOverrides) {
-    proc = PlatformCommand.env(proc, envOverrides)
+export class ShellService extends Context.Tag("ShellService")<
+  ShellService,
+  {
+    readonly exec: (command: string, args: ReadonlyArray<string>) => Effect.Effect<ExecResult, PlatformError>
+    readonly execInteractive: (command: string, args: ReadonlyArray<string>) => Effect.Effect<void, PlatformError>
+    readonly execInDir: (cwd: string, command: string, envOverrides?: Record<string, string>) => Effect.Effect<void, PlatformError>
   }
-  return PlatformCommand.exitCode(proc).pipe(Effect.asVoid)
-}
+>() {}
+
+export const ShellServiceLive = Layer.effect(
+  ShellService,
+  Effect.gen(function* () {
+    const executor = yield* CommandExecutor.CommandExecutor
+
+    const provide = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>): Effect.Effect<A, E> =>
+      Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
+
+    return ShellService.of({
+      exec: (command, args) => {
+        const proc = PlatformCommand.make(command, ...args)
+        return provide(
+          PlatformCommand.string(proc).pipe(
+            Effect.map((stdout): ExecResult => ({ stdout, stderr: "", exitCode: 0 }))
+          )
+        )
+      },
+
+      execInteractive: (command, args) => {
+        const proc = PlatformCommand.make(command, ...args).pipe(
+          PlatformCommand.stdin("inherit"),
+          PlatformCommand.stdout("inherit"),
+          PlatformCommand.stderr("inherit")
+        )
+        return provide(PlatformCommand.exitCode(proc).pipe(Effect.asVoid))
+      },
+
+      execInDir: (cwd, command, envOverrides) => {
+        let proc = PlatformCommand.make("sh", "-c", command).pipe(
+          PlatformCommand.workingDirectory(cwd),
+          PlatformCommand.stdout("inherit"),
+          PlatformCommand.stderr("inherit")
+        )
+        if (envOverrides) {
+          proc = PlatformCommand.env(proc, envOverrides)
+        }
+        return provide(PlatformCommand.exitCode(proc).pipe(Effect.asVoid))
+      }
+    })
+  })
+)

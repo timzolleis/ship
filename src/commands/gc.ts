@@ -1,22 +1,11 @@
 import { Command, Options, Prompt } from "@effect/cli"
-import { CommandExecutor } from "@effect/platform"
 import { Console, Effect } from "effect"
 import { ConfigService } from "../services/config.js"
 import { ProxyService } from "../services/proxy.js"
-import * as Shell from "../services/shell.js"
-import * as Git from "../services/git.js"
-import * as Database from "../services/database.js"
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`
-const blue = (s: string) => `\x1b[34m${s}\x1b[0m`
+import { ShellService } from "../services/shell.js"
+import { GitService } from "../services/git.js"
+import { DatabaseService } from "../services/database.js"
+import { bold, dim, green, red, yellow, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
 // ship gc [--force] [--dry-run]
@@ -31,31 +20,6 @@ interface PrStatus {
   mergedAt?: string
 }
 
-const getPrStatus = (
-  branch: string,
-  repoPath: string
-): Effect.Effect<PrStatus | null, never, CommandExecutor.CommandExecutor> =>
-  Shell.exec("gh", [
-    "pr", "view", branch,
-    "--repo", getOriginRepo(repoPath),
-    "--json", "state,number,mergedAt"
-  ]).pipe(
-    Effect.map((r) => {
-      try {
-        return JSON.parse(r.stdout) as PrStatus
-      } catch {
-        return null
-      }
-    }),
-    Effect.catchAll(() => Effect.succeed(null))
-  )
-
-/** Extract owner/repo from git remote origin */
-const getOriginRepo = (repoPath: string): string => {
-  // This is a sync fallback — gh will figure it out from cwd anyway
-  return ""
-}
-
 export const gcCommand = Command.make(
   "gc",
   { force: forceOpt, dryRun: dryRunOpt },
@@ -63,10 +27,9 @@ export const gcCommand = Command.make(
     Effect.gen(function* () {
       const config = yield* ConfigService
       const proxy = yield* ProxyService
-      const executor = yield* CommandExecutor.CommandExecutor
-
-      const run = <A, E>(effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>) =>
-        Effect.provideService(effect, CommandExecutor.CommandExecutor, executor)
+      const shell = yield* ShellService
+      const git = yield* GitService
+      const db = yield* DatabaseService
 
       const workspaces = yield* config.loadWorkspaces()
 
@@ -86,15 +49,12 @@ export const gcCommand = Command.make(
           Effect.catchAll(() => Effect.succeed(null))
         )
 
-        // Check PR status via gh CLI (run from project dir)
-        const cwd = projectConfig?.path ?? ws.path
-        const prStatus = yield* run(
-          Shell.exec("gh", ["pr", "view", ws.branch, "--json", "state,number,mergedAt"]).pipe(
-            Effect.map((r) => {
-              try { return JSON.parse(r.stdout) as PrStatus } catch { return null }
-            }),
-            Effect.catchAll(() => Effect.succeed(null))
-          )
+        // Check PR status via gh CLI
+        const prStatus = yield* shell.exec("gh", ["pr", "view", ws.branch, "--json", "state,number,mergedAt"]).pipe(
+          Effect.map((r) => {
+            try { return JSON.parse(r.stdout) as PrStatus } catch { return null }
+          }),
+          Effect.catchAll(() => Effect.succeed(null))
         )
 
         const prLabel = prStatus
@@ -115,15 +75,14 @@ export const gcCommand = Command.make(
             }))
 
             if (shouldClean) {
-              // Teardown
               yield* proxy.removeRoute(ws.proxyDomain).pipe(Effect.catchAll(() => Effect.void))
               if (projectConfig) {
-                yield* run(Database.dropDb(
+                yield* db.dropDb(
                   projectConfig.database.container, projectConfig.database.user, ws.dbName
-                )).pipe(Effect.catchAll(() => Effect.void))
+                ).pipe(Effect.catchAll(() => Effect.void))
               }
-              yield* run(Git.worktreeRemove(ws.path, true)).pipe(Effect.catchAll(() => Effect.void))
-              yield* run(Git.deleteBranch(ws.branch)).pipe(Effect.catchAll(() => Effect.void))
+              yield* git.worktreeRemove(ws.path, true).pipe(Effect.catchAll(() => Effect.void))
+              yield* git.deleteBranch(ws.branch).pipe(Effect.catchAll(() => Effect.void))
               yield* config.removeWorkspace(ws.project, ws.branch)
 
               yield* Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${green("cleaned up")}`)
@@ -147,7 +106,7 @@ export const gcCommand = Command.make(
       yield* Console.log("")
     }).pipe(
       Effect.catchAll((e) =>
-        Console.error(`\n  ${red("Error:")} ${"message" in e ? e.message : String(e)}\n`)
+        Console.error(`\n  ${red("Error:")} ${e.message}\n`)
       )
     )
 )

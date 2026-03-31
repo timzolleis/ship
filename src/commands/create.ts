@@ -157,15 +157,10 @@ export const createCommand = Command.make(
         yield* run(Shell.execInDir(worktreeDir, projectConfig.commands.generate))
       }
 
-      // 10. Run migrations
+      // 10. Run migrations (patched .env already has the correct DATABASE_URL)
       if (projectConfig.commands.migrate) {
         yield* Console.log(`  Running migrations...`)
-        const dbUrl = `postgresql://${projectConfig.database.user}@${projectConfig.database.host}:${projectConfig.database.port}/${dbName}`
-        yield* run(
-          Shell.execInDir(worktreeDir, projectConfig.commands.migrate, {
-            DATABASE_URL: dbUrl
-          })
-        )
+        yield* run(Shell.execInDir(worktreeDir, projectConfig.commands.migrate))
         yield* Console.log(`  ${green("✓")} Migrations     applied`)
       }
 

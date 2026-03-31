@@ -68,22 +68,16 @@ export const resetCommand = Command.make(
         yield* Console.log(`  ${green("✓")} Cloned ${db.source} → ${workspace.dbName}`)
       }
 
-      // 3. Re-run migrations
+      // 3. Re-run migrations (patched .env already has the correct DATABASE_URL)
       if (projectConfig.commands.migrate) {
-        const dbUrl = `postgresql://${db.user}@${db.host}:${db.port}/${workspace.dbName}`
-        yield* run(Shell.execInDir(workspace.path, projectConfig.commands.migrate, {
-          DATABASE_URL: dbUrl
-        }))
+        yield* run(Shell.execInDir(workspace.path, projectConfig.commands.migrate))
         yield* Console.log(`  ${green("✓")} Migrations applied`)
       }
 
       // 4. Seed if fresh and seed command exists
       if (fresh && projectConfig.commands.seed) {
         yield* Console.log(`  Running seed...`)
-        const dbUrl = `postgresql://${db.user}@${db.host}:${db.port}/${workspace.dbName}`
-        yield* run(Shell.execInDir(workspace.path, projectConfig.commands.seed, {
-          DATABASE_URL: dbUrl
-        }))
+        yield* run(Shell.execInDir(workspace.path, projectConfig.commands.seed))
         yield* Console.log(`  ${green("✓")} Seeded`)
       }
 

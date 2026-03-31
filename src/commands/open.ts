@@ -58,7 +58,6 @@ export const openCommand = Command.make(
         }
         case "db": {
           const db = projectConfig.database
-          const dbUrl = `postgresql://${db.user}@${db.host}:${db.port}/${workspace.dbName}`
           yield* Console.log(`  Connecting to ${bold(workspace.dbName)}...`)
           yield* run(Shell.execInteractive("docker", [
             "exec", "-it", db.container,

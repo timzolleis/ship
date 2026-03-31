@@ -27,7 +27,7 @@ export class DatabaseConfig extends Schema.Class<DatabaseConfig>("DatabaseConfig
   user: Schema.String,
   source: Schema.String,
   host: Schema.optionalWith(Schema.String, { default: () => "localhost" }),
-  port: Schema.optionalWith(Schema.Number, { default: () => 5432 })
+  port: Schema.optionalWith(Schema.Number, { default: () => 5432 }),
 }) {}
 
 // ---------------------------------------------------------------------------

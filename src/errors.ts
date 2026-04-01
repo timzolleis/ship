@@ -1,5 +1,9 @@
 import { Schema } from "effect"
 
+// ---------------------------------------------------------------------------
+// Config errors
+// ---------------------------------------------------------------------------
+
 export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundError>()(
   "ProjectNotFoundError",
   { alias: Schema.String }
@@ -9,14 +13,71 @@ export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundErro
   }
 }
 
-export class InvalidConfigError extends Schema.TaggedError<InvalidConfigError>()(
-  "InvalidConfigError",
+export class ParseConfigError extends Schema.TaggedError<ParseConfigError>()(
+  "ParseConfigError",
+  { file: Schema.String, detail: Schema.String }
+) {
+  get message() {
+    return `Failed to parse ${this.file}: ${this.detail}`
+  }
+}
+
+export class EncodeConfigError extends Schema.TaggedError<EncodeConfigError>()(
+  "EncodeConfigError",
   { detail: Schema.String }
 ) {
   get message() {
-    return `Invalid config: ${this.detail}`
+    return `Failed to encode config: ${this.detail}`
   }
 }
+
+// ---------------------------------------------------------------------------
+// Filesystem errors
+// ---------------------------------------------------------------------------
+
+export class CreateDirectoryError extends Schema.TaggedError<CreateDirectoryError>()(
+  "CreateDirectoryError",
+  { path: Schema.String, detail: Schema.String }
+) {
+  get message() {
+    return `Failed to create directory '${this.path}': ${this.detail}`
+  }
+}
+
+export class ReadFileError extends Schema.TaggedError<ReadFileError>()(
+  "ReadFileError",
+  { path: Schema.String, detail: Schema.String }
+) {
+  get message() {
+    return `Failed to read '${this.path}': ${this.detail}`
+  }
+}
+
+export class WriteFileError extends Schema.TaggedError<WriteFileError>()(
+  "WriteFileError",
+  { path: Schema.String, detail: Schema.String }
+) {
+  get message() {
+    return `Failed to write '${this.path}': ${this.detail}`
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shell errors
+// ---------------------------------------------------------------------------
+
+export class ShellExecError extends Schema.TaggedError<ShellExecError>()(
+  "ShellExecError",
+  { command: Schema.String, stderr: Schema.String }
+) {
+  get message() {
+    return this.stderr || `Command failed: ${this.command}`
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Proxy errors
+// ---------------------------------------------------------------------------
 
 export class RouteExistsError extends Schema.TaggedError<RouteExistsError>()(
   "RouteExistsError",

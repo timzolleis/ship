@@ -48,14 +48,17 @@ export const gcCommand = Command.make(
         const projectConfig = yield* config.getProject(ws.project).pipe(
           Effect.catchAll(() => Effect.succeed(null))
         )
+        const projectShell = projectConfig ? shell.inDir(projectConfig.path) : null
 
         // Check PR status via gh CLI
-        const prStatus = yield* shell.exec("gh", ["pr", "view", ws.branch, "--json", "state,number,mergedAt"]).pipe(
-          Effect.map((r) => {
-            try { return JSON.parse(r.stdout) as PrStatus } catch { return null }
-          }),
-          Effect.catchAll(() => Effect.succeed(null))
-        )
+        const prStatus = projectShell
+          ? yield* projectShell.exec("gh", ["pr", "view", ws.branch, "--json", "state,number,mergedAt"]).pipe(
+              Effect.map((r) => {
+                try { return JSON.parse(r.stdout) as PrStatus } catch { return null }
+              }),
+              Effect.catchAll(() => Effect.succeed(null))
+            )
+          : null
 
         const prLabel = prStatus
           ? prStatus.state === "MERGED"
@@ -80,9 +83,9 @@ export const gcCommand = Command.make(
                 yield* db.dropDb(
                   projectConfig.database.container, projectConfig.database.user, ws.dbName
                 ).pipe(Effect.catchAll(() => Effect.void))
+                yield* git.worktreeRemove(projectConfig.path, ws.path, true).pipe(Effect.catchAll(() => Effect.void))
+                yield* git.deleteBranch(projectConfig.path, ws.branch).pipe(Effect.catchAll(() => Effect.void))
               }
-              yield* git.worktreeRemove(ws.path, true).pipe(Effect.catchAll(() => Effect.void))
-              yield* git.deleteBranch(ws.branch).pipe(Effect.catchAll(() => Effect.void))
               yield* config.removeWorkspace(ws.project, ws.branch)
 
               yield* Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${green("cleaned up")}`)

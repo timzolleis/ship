@@ -1,8 +1,15 @@
 import { FileSystem, Path } from "@effect/platform"
-import type { PlatformError } from "@effect/platform/Error"
-import { Effect, Context, Layer } from "effect"
+import { Effect } from "effect"
 import { ShellService } from "./shell.js"
-import { RouteExistsError, RouteNotFoundError, CertNotFoundError } from "../errors.js"
+import {
+  ShellExecError,
+  RouteExistsError,
+  RouteNotFoundError,
+  CertNotFoundError,
+  CreateDirectoryError,
+  ReadFileError,
+  WriteFileError
+} from "../errors.js"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -13,38 +20,24 @@ export interface Route {
   readonly port: number
 }
 
-export type ProxyError = RouteExistsError | RouteNotFoundError | CertNotFoundError | PlatformError
+type FsError = CreateDirectoryError | ReadFileError | WriteFileError
+
+export type ProxyError =
+  | RouteExistsError
+  | RouteNotFoundError
+  | CertNotFoundError
+  | ShellExecError
+  | FsError
 
 // ---------------------------------------------------------------------------
 // ProxyService
 // ---------------------------------------------------------------------------
 
-export class ProxyService extends Context.Tag("ProxyService")<
-  ProxyService,
-  {
-    readonly configDir: () => Effect.Effect<string>
-    readonly caddyfilePath: () => Effect.Effect<string>
-    readonly ensureSetup: () => Effect.Effect<void, PlatformError>
-    readonly isRunning: () => Effect.Effect<boolean>
-    readonly getRoutes: () => Effect.Effect<ReadonlyArray<Route>, PlatformError>
-    readonly addRoute: (domain: string, port: number) => Effect.Effect<void, RouteExistsError | PlatformError>
-    readonly removeRoute: (domain: string) => Effect.Effect<void, RouteNotFoundError | PlatformError>
-    readonly reload: () => Effect.Effect<void>
-    readonly start: () => Effect.Effect<void, PlatformError>
-    readonly stop: () => Effect.Effect<void>
-    readonly status: () => Effect.Effect<{ running: boolean; routes: ReadonlyArray<Route> }, PlatformError>
-    readonly trust: () => Effect.Effect<void, CertNotFoundError | PlatformError>
-    readonly nextPort: () => Effect.Effect<number, PlatformError>
-    readonly editCaddyfile: () => Effect.Effect<void, PlatformError>
-  }
->() {}
-
 const CONTAINER = "ship-proxy"
 const BASE_PORT = 5173
 
-export const ProxyServiceLive = Layer.effect(
-  ProxyService,
-  Effect.gen(function* () {
+export class ProxyService extends Effect.Service<ProxyService>()("ProxyService", {
+  effect: Effect.gen(function* () {
     const fsSvc = yield* FileSystem.FileSystem
     const pathSvc = yield* Path.Path
     const shell = yield* ShellService
@@ -55,38 +48,59 @@ export const ProxyServiceLive = Layer.effect(
     const caddyData = pathSvc.join(proxyDir, "caddy-data")
     const caddyConfig = pathSvc.join(proxyDir, "caddy-config")
 
+    // -- Fs helpers with mapped errors --
+
+    const mkDir = (path: string): Effect.Effect<void, CreateDirectoryError> =>
+      fsSvc.makeDirectory(path, { recursive: true }).pipe(
+        Effect.mapError((e) => new CreateDirectoryError({ path, detail: String(e) }))
+      )
+
+    const readFile = (path: string): Effect.Effect<string, ReadFileError> =>
+      fsSvc.readFileString(path).pipe(
+        Effect.mapError((e) => new ReadFileError({ path, detail: String(e) }))
+      )
+
+    const writeFile = (path: string, content: string): Effect.Effect<void, WriteFileError> =>
+      fsSvc.writeFileString(path, content).pipe(
+        Effect.mapError((e) => new WriteFileError({ path, detail: String(e) }))
+      )
+
+    const fileExists = (path: string): Effect.Effect<boolean, ReadFileError> =>
+      fsSvc.exists(path).pipe(
+        Effect.mapError((e) => new ReadFileError({ path, detail: String(e) }))
+      )
+
     // -- Internal helpers --
 
-    const ensureSetup = (): Effect.Effect<void, PlatformError> =>
-      Effect.gen(function* () {
-        yield* fsSvc.makeDirectory(proxyDir, { recursive: true })
-        yield* fsSvc.makeDirectory(caddyData, { recursive: true })
-        yield* fsSvc.makeDirectory(caddyConfig, { recursive: true })
-        const exists = yield* fsSvc.exists(caddyfile)
-        if (!exists) yield* fsSvc.writeFileString(caddyfile, "")
+    const ensureSetup: () => Effect.Effect<void, FsError> =
+      Effect.fn("ProxyService.ensureSetup")(function* () {
+        yield* mkDir(proxyDir)
+        yield* mkDir(caddyData)
+        yield* mkDir(caddyConfig)
+        const exists = yield* fileExists(caddyfile)
+        if (!exists) yield* writeFile(caddyfile, "")
       })
 
-    const readCaddyfile = (): Effect.Effect<string, PlatformError> =>
+    const readCaddyfile = (): Effect.Effect<string, FsError> =>
       Effect.gen(function* () {
         yield* ensureSetup()
-        return yield* fsSvc.readFileString(caddyfile)
+        return yield* readFile(caddyfile)
       })
-
-    const writeCaddyfile = (content: string): Effect.Effect<void, PlatformError> =>
-      fsSvc.writeFileString(caddyfile, content)
 
     // -- Public methods --
 
-    const isRunning = (): Effect.Effect<boolean> =>
-      shell.exec("docker", ["ps", "--format", "{{.Names}}"]).pipe(
-        Effect.map((result) =>
-          result.stdout.split("\n").some((name) => name.trim() === CONTAINER)
-        ),
-        Effect.catchAll(() => Effect.succeed(false))
-      )
+    const isRunning: () => Effect.Effect<boolean> =
+      Effect.fn("ProxyService.isRunning")(function* () {
+        return yield* shell.exec("docker", ["ps", "--format", "{{.Names}}"]).pipe(
+          Effect.map((result) =>
+            result.stdout.split("\n").some((name) => name.trim() === CONTAINER)
+          ),
+          Effect.catchAll(() => Effect.succeed(false))
+        )
+      })
 
-    const getRoutes = (): Effect.Effect<ReadonlyArray<Route>, PlatformError> =>
-      Effect.gen(function* () {
+    const getRoutes: () => Effect.Effect<ReadonlyArray<Route>, FsError> =
+      Effect.fn("ProxyService.getRoutes")(function* () {
         const content = yield* readCaddyfile()
         if (content.trim().length === 0) return [] as ReadonlyArray<Route>
         const routes: Route[] = []
@@ -104,31 +118,33 @@ export const ProxyServiceLive = Layer.effect(
         return routes as ReadonlyArray<Route>
       })
 
-    const reload = (): Effect.Effect<void> =>
-      isRunning().pipe(
-        Effect.flatMap((running) =>
-          running
-            ? shell.exec("docker", ["exec", CONTAINER, "caddy", "reload", "--config", "/etc/caddy/Caddyfile"]).pipe(
-                Effect.asVoid,
-                Effect.catchAll(() => Effect.void)
-              )
-            : Effect.void
+    const reload: () => Effect.Effect<void> =
+      Effect.fn("ProxyService.reload")(function* () {
+        yield* isRunning().pipe(
+          Effect.flatMap((running) =>
+            running
+              ? shell.exec("docker", ["exec", CONTAINER, "caddy", "reload", "--config", "/etc/caddy/Caddyfile"]).pipe(
+                  Effect.asVoid,
+                  Effect.catchAll(() => Effect.void)
+                )
+              : Effect.void
+          )
         )
-      )
+      })
 
-    const addRoute = (domain: string, port: number): Effect.Effect<void, RouteExistsError | PlatformError> =>
-      Effect.gen(function* () {
+    const addRoute: (domain: string, port: number) => Effect.Effect<void, RouteExistsError | FsError> =
+      Effect.fn("ProxyService.addRoute")(function* (domain, port) {
         const content = yield* readCaddyfile()
         if (content.includes(`${domain} {`)) {
           return yield* new RouteExistsError({ domain })
         }
         const block = `\n${domain} {\n    reverse_proxy host.docker.internal:${port}\n}\n`
-        yield* writeCaddyfile(content + block)
+        yield* writeFile(caddyfile, content + block)
         yield* reload()
       })
 
-    const removeRoute = (domain: string): Effect.Effect<void, RouteNotFoundError | PlatformError> =>
-      Effect.gen(function* () {
+    const removeRoute: (domain: string) => Effect.Effect<void, RouteNotFoundError | FsError> =
+      Effect.fn("ProxyService.removeRoute")(function* (domain) {
         const content = yield* readCaddyfile()
         if (!content.includes(`${domain} {`)) {
           return yield* new RouteNotFoundError({ domain })
@@ -142,12 +158,12 @@ export const ProxyServiceLive = Layer.effect(
           if (!skip) result.push(line)
         }
         const cleaned = result.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n"
-        yield* writeCaddyfile(cleaned)
+        yield* writeFile(caddyfile, cleaned)
         yield* reload()
       })
 
-    const start = (): Effect.Effect<void, PlatformError> =>
-      Effect.gen(function* () {
+    const start: () => Effect.Effect<void, ShellExecError | FsError> =
+      Effect.fn("ProxyService.start")(function* () {
         yield* ensureSetup()
         const running = yield* isRunning()
         if (running) return
@@ -163,45 +179,45 @@ export const ProxyServiceLive = Layer.effect(
           "-v", `${caddyConfig}:/config`,
           "caddy:2-alpine"
         ])
-      }).pipe(Effect.asVoid)
+      })
 
-    const stop = (): Effect.Effect<void> =>
-      shell.exec("docker", ["rm", "-f", CONTAINER]).pipe(
-        Effect.catchAll(() => Effect.void),
-        Effect.asVoid
-      )
+    const stop: () => Effect.Effect<void> =
+      Effect.fn("ProxyService.stop")(function* () {
+        yield* shell.exec("docker", ["rm", "-f", CONTAINER]).pipe(
+          Effect.catchAll(() => Effect.void)
+        )
+      })
 
-    const trust = (): Effect.Effect<void, CertNotFoundError | PlatformError> =>
-      Effect.gen(function* () {
+    const trust: () => Effect.Effect<void, CertNotFoundError | ShellExecError | ReadFileError> =
+      Effect.fn("ProxyService.trust")(function* () {
         const caPath = pathSvc.join(caddyData, "caddy", "pki", "authorities", "local", "root.crt")
-        const exists = yield* fsSvc.exists(caPath)
+        const exists = yield* fileExists(caPath)
         if (!exists) return yield* new CertNotFoundError()
         yield* shell.exec("sudo", [
           "security", "add-trusted-cert", "-d", "-r", "trustRoot",
           "-k", "/Library/Keychains/System.keychain", caPath
         ])
-      }).pipe(Effect.asVoid)
+      })
 
-    const nextPort = (): Effect.Effect<number, PlatformError> =>
-      getRoutes().pipe(
-        Effect.map((routes) => {
-          let max = BASE_PORT
-          for (const route of routes) {
-            if (route.port > max) max = route.port
-          }
-          return max + 1
-        })
-      )
+    const nextPort: () => Effect.Effect<number, FsError> =
+      Effect.fn("ProxyService.nextPort")(function* () {
+        const routes = yield* getRoutes()
+        let max = BASE_PORT
+        for (const route of routes) {
+          if (route.port > max) max = route.port
+        }
+        return max + 1
+      })
 
-    const editCaddyfile = (): Effect.Effect<void, PlatformError> =>
-      Effect.gen(function* () {
+    const editCaddyfile: () => Effect.Effect<void, ShellExecError | FsError> =
+      Effect.fn("ProxyService.editCaddyfile")(function* () {
         yield* ensureSetup()
         const editor = process.env.EDITOR ?? "vi"
         yield* shell.execInteractive(editor, [caddyfile])
         yield* reload()
       })
 
-    return ProxyService.of({
+    return {
       configDir: () => Effect.succeed(proxyDir),
       caddyfilePath: () => Effect.succeed(caddyfile),
       ensureSetup,
@@ -216,6 +232,7 @@ export const ProxyServiceLive = Layer.effect(
       trust,
       nextPort,
       editCaddyfile
-    })
-  })
-)
+    }
+  }),
+  dependencies: [ShellService.Default]
+}) {}

@@ -9,7 +9,7 @@ import { ShellService } from "../services/shell.js"
 import { EditorService } from "../services/editor.js"
 import { ShipConfig } from "../schema/config.js"
 import { Workspace } from "../schema/workspace.js"
-import * as Env from "../services/env.js"
+import { EnvService } from "../services/env.js"
 import { bold, dim, green, red, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,7 @@ export const createCommand = Command.make(
       const db = yield* DatabaseService
       const shell = yield* ShellService
       const editor = yield* EditorService
+      const env = yield* EnvService
       const pathSvc = yield* Path.Path
 
       // 1. Resolve project config
@@ -98,9 +99,10 @@ export const createCommand = Command.make(
       const dbName = resolvePattern(projectConfig.worktree.dbNamePattern, vars)
 
       yield* Console.log("")
+      yield* Effect.logDebug("create", { repoPath: projectConfig.path, worktreeDir, branch, branchSlug, dirPattern: projectConfig.worktree.dirPattern })
 
       // 5. Create git worktree
-      yield* git.worktreeAdd(worktreeDir, branch)
+      yield* git.worktreeAdd(projectConfig.path, worktreeDir, branch)
       yield* Console.log(`  ${green("✓")} Branch         ${bold(branch)}`)
       yield* Console.log(`  ${green("✓")} Worktree       ${dim(worktreeDir)}`)
 
@@ -123,7 +125,7 @@ export const createCommand = Command.make(
       yield* Console.log("")
       yield* Console.log(`  Configuring environment...`)
       const port = yield* proxy.nextPort()
-      const patchResults = yield* Env.patchEnvFiles(
+      const patchResults = yield* env.patchEnvFiles(
         projectConfig.path,
         worktreeDir,
         projectConfig.env,

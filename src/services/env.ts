@@ -1,10 +1,10 @@
 import { FileSystem, Path } from "@effect/platform"
-import type { PlatformError } from "@effect/platform/Error"
 import { Effect } from "effect"
 import type { EnvConfig } from "../schema/config.js"
+import { CreateDirectoryError, ReadFileError, WriteFileError } from "../errors.js"
 
 // ---------------------------------------------------------------------------
-// .env patching
+// EnvService
 // ---------------------------------------------------------------------------
 
 export interface EnvPatchContext {
@@ -13,90 +13,100 @@ export interface EnvPatchContext {
   readonly port: number
 }
 
-interface PatchResult {
+export interface PatchResult {
   readonly file: string
   readonly changes: ReadonlyArray<{ key: string; from: string; to: string }>
 }
 
-/**
- * Copy .env files from source project to worktree, patching URL values.
- */
-export const patchEnvFiles = (
-  sourceDir: string,
-  targetDir: string,
-  envConfig: EnvConfig,
-  ctx: EnvPatchContext
-): Effect.Effect<ReadonlyArray<PatchResult>, PlatformError, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
+type EnvError = CreateDirectoryError | ReadFileError | WriteFileError
+
+export class EnvService extends Effect.Service<EnvService>()("EnvService", {
+  effect: Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
     const pathSvc = yield* Path.Path
-    const results: PatchResult[] = []
 
-    for (const file of envConfig.files) {
-      const sourcePath = pathSvc.join(sourceDir, file)
-      const targetPath = pathSvc.join(targetDir, file)
+    const patchEnvFiles: (
+      sourceDir: string,
+      targetDir: string,
+      envConfig: EnvConfig,
+      ctx: EnvPatchContext
+    ) => Effect.Effect<ReadonlyArray<PatchResult>, EnvError> =
+      Effect.fn("EnvService.patchEnvFiles")(function* (sourceDir, targetDir, envConfig, ctx) {
+        const results: PatchResult[] = []
 
-      const exists = yield* fs.exists(sourcePath)
-      if (!exists) continue
+        for (const file of envConfig.files) {
+          const sourcePath = pathSvc.join(sourceDir, file)
+          const targetPath = pathSvc.join(targetDir, file)
 
-      const content = yield* fs.readFileString(sourcePath)
-      const changes: PatchResult["changes"][number][] = []
-      const lines: string[] = []
+          const exists = yield* fs.exists(sourcePath).pipe(
+            Effect.mapError((e) => new ReadFileError({ path: sourcePath, detail: String(e) }))
+          )
+          if (!exists) continue
 
-      for (const line of content.split("\n")) {
-        const match = line.match(/^([A-Z_]+)=(.+)$/)
-        if (!match) {
-          lines.push(line)
-          continue
-        }
-        const [, key, rawValue] = match
-        if (!key || !rawValue) {
-          lines.push(line)
-          continue
-        }
+          const content = yield* fs.readFileString(sourcePath).pipe(
+            Effect.mapError((e) => new ReadFileError({ path: sourcePath, detail: String(e) }))
+          )
+          const changes: PatchResult["changes"][number][] = []
+          const lines: string[] = []
 
-        const varConfig = envConfig.autoDetected[key]
-        if (!varConfig) {
-          lines.push(line)
-          continue
-        }
+          for (const line of content.split("\n")) {
+            const match = line.match(/^([A-Z_]+)=(.+)$/)
+            if (!match) {
+              lines.push(line)
+              continue
+            }
+            const [, key, rawValue] = match
+            if (!key || !rawValue) {
+              lines.push(line)
+              continue
+            }
 
-        const value = rawValue.replace(/^["']|["']$/g, "")
-        let newValue = value
+            const varConfig = envConfig.autoDetected[key]
+            if (!varConfig) {
+              lines.push(line)
+              continue
+            }
 
-        switch (varConfig.type) {
-          case "database_url": {
-            // Replace the database name in the URL
-            newValue = value.replace(/\/([^/]+)$/, `/${ctx.dbName}`)
-            break
+            const value = rawValue.replace(/^["']|["']$/g, "")
+            let newValue = value
+
+            switch (varConfig.type) {
+              case "database_url": {
+                newValue = value.replace(/\/([^/]+)$/, `/${ctx.dbName}`)
+                break
+              }
+              case "proxy_url": {
+                newValue = value.replace(/https?:\/\/[^/]+/, `https://${ctx.proxyDomain}`)
+                break
+              }
+              case "dev_url": {
+                const urlPath = varConfig.path ?? ""
+                newValue = `http://localhost:${ctx.port}${urlPath}`
+                break
+              }
+              default:
+                break
+            }
+
+            if (newValue !== value) {
+              changes.push({ key, from: value, to: newValue })
+            }
+            lines.push(`${key}=${newValue}`)
           }
-          case "proxy_url": {
-            // Replace the domain with the proxy domain
-            newValue = value.replace(/https?:\/\/[^/]+/, `https://${ctx.proxyDomain}`)
-            break
-          }
-          case "dev_url": {
-            // Replace with localhost:port + optional path
-            const urlPath = varConfig.path ?? ""
-            newValue = `http://localhost:${ctx.port}${urlPath}`
-            break
-          }
-          default:
-            break
+
+          const targetDirPath = pathSvc.dirname(targetPath)
+          yield* fs.makeDirectory(targetDirPath, { recursive: true }).pipe(
+            Effect.mapError((e) => new CreateDirectoryError({ path: targetDirPath, detail: String(e) }))
+          )
+          yield* fs.writeFileString(targetPath, lines.join("\n")).pipe(
+            Effect.mapError((e) => new WriteFileError({ path: targetPath, detail: String(e) }))
+          )
+          results.push({ file, changes })
         }
 
-        if (newValue !== value) {
-          changes.push({ key, from: value, to: newValue })
-        }
-        lines.push(`${key}=${newValue}`)
-      }
+        return results
+      })
 
-      // Ensure target directory exists
-      const targetDirPath = pathSvc.dirname(targetPath)
-      yield* fs.makeDirectory(targetDirPath, { recursive: true })
-      yield* fs.writeFileString(targetPath, lines.join("\n"))
-      results.push({ file, changes })
-    }
-
-    return results
+    return { patchEnvFiles }
   })
+}) {}

@@ -1,6 +1,6 @@
 import { Command } from "@effect/cli"
 import { NodeContext, NodeRuntime } from "@effect/platform-node"
-import { Console, Effect, Layer } from "effect"
+import { Console, Effect, Layer, Logger, LogLevel } from "effect"
 import { createCommand } from "./commands/create.js"
 import { downCommand } from "./commands/down.js"
 import { gcCommand } from "./commands/gc.js"
@@ -10,12 +10,13 @@ import { openCommand } from "./commands/open.js"
 import { resetCommand } from "./commands/reset.js"
 import { upCommand } from "./commands/up.js"
 import { proxyCommand } from "./commands/proxy/proxy.js"
-import { ShellServiceLive } from "./services/shell.js"
-import { GitServiceLive } from "./services/git.js"
-import { DatabaseServiceLive } from "./services/database.js"
-import { ConfigServiceLive } from "./services/config.js"
-import { ProxyServiceLive } from "./services/proxy.js"
-import { EditorServiceLive } from "./services/editor.js"
+import { ShellService } from "./services/shell.js"
+import { GitService } from "./services/git.js"
+import { DatabaseService } from "./services/database.js"
+import { ConfigService } from "./services/config.js"
+import { ProxyService } from "./services/proxy.js"
+import { EditorService } from "./services/editor.js"
+import { EnvService } from "./services/env.js"
 import { bold, dim, blue } from "./fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -90,26 +91,20 @@ const cli = Command.run(command, {
 // Layer composition
 // ---------------------------------------------------------------------------
 
-const ShellLive = ShellServiceLive.pipe(Layer.provide(NodeContext.layer))
-const GitLive = GitServiceLive.pipe(Layer.provide(ShellLive))
-const DatabaseLive = DatabaseServiceLive.pipe(Layer.provide(ShellLive))
-const ConfigLive = ConfigServiceLive.pipe(Layer.provide(NodeContext.layer))
-const ProxyLive = ProxyServiceLive.pipe(
-  Layer.provide(Layer.merge(NodeContext.layer, ShellLive))
-)
-const EditorLive = EditorServiceLive.pipe(
-  Layer.provide(Layer.mergeAll(NodeContext.layer, ShellLive, ConfigLive))
+const LogLevelLive = Logger.minimumLogLevel(
+  process.env.SHIP_DEBUG ? LogLevel.Debug : LogLevel.Info
 )
 
 const MainLayer = Layer.mergeAll(
-  NodeContext.layer,
-  ShellLive,
-  GitLive,
-  DatabaseLive,
-  ConfigLive,
-  ProxyLive,
-  EditorLive
-)
+  ShellService.Default,
+  GitService.Default,
+  DatabaseService.Default,
+  ConfigService.Default,
+  ProxyService.Default,
+  EditorService.Default,
+  EnvService.Default,
+  LogLevelLive
+).pipe(Layer.provideMerge(NodeContext.layer))
 
 // ---------------------------------------------------------------------------
 // Run

@@ -1,71 +1,81 @@
-import type { PlatformError } from "@effect/platform/Error"
-import { Context, Effect, Layer } from "effect"
+import { Effect } from "effect"
+import type { ShellExecError } from "../errors.js"
 import { ShellService } from "./shell.js"
+import type { ExecResult } from "./shell.js"
 
 // ---------------------------------------------------------------------------
 // GitService
 // ---------------------------------------------------------------------------
 
-export class GitService extends Context.Tag("GitService")<
-  GitService,
-  {
-    readonly worktreeAdd: (path: string, branch: string, baseBranch?: string) => Effect.Effect<void, PlatformError>
-    readonly worktreeRemove: (path: string, force: boolean) => Effect.Effect<void, PlatformError>
-    readonly worktreeList: () => Effect.Effect<ReadonlyArray<{ path: string; branch: string }>, PlatformError>
-    readonly deleteBranch: (branch: string) => Effect.Effect<void, PlatformError>
-    readonly repoRoot: () => Effect.Effect<string, PlatformError>
-    readonly currentBranch: () => Effect.Effect<string, PlatformError>
-  }
->() {}
-
-export const GitServiceLive = Layer.effect(
-  GitService,
-  Effect.gen(function* () {
+export class GitService extends Effect.Service<GitService>()("GitService", {
+  effect: Effect.gen(function* () {
     const shell = yield* ShellService
 
-    const run = (args: ReadonlyArray<string>) => shell.exec("git", args)
+    const run = (repoPath: string, args: ReadonlyArray<string>): Effect.Effect<ExecResult, ShellExecError> =>
+      shell.exec("git", ["-C", repoPath, ...args]).pipe(
+        Effect.tap((r) => Effect.logDebug("git", { args, stdout: r.stdout.trim() })),
+        Effect.tapError((e) => Effect.logDebug("git failed", { args, error: e }))
+      )
 
-    return GitService.of({
-      worktreeAdd: (path, branch, baseBranch) =>
-        Effect.gen(function* () {
-          const branchExists = yield* run(["branch", "--list", branch]).pipe(
+    const worktreeAdd: (repoPath: string, path: string, branch: string, baseBranch?: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("GitService.worktreeAdd")(function* (repoPath, path, branch, baseBranch) {
+        yield* run(repoPath, ["worktree", "prune"]).pipe(Effect.catchAll(() => Effect.void))
+        const localExists = yield* run(repoPath, ["branch", "--list", branch]).pipe(
+          Effect.map((r) => r.stdout.trim().length > 0)
+        )
+        if (localExists) {
+          yield* run(repoPath, ["worktree", "add", path, branch])
+        } else {
+          const remoteExists = yield* run(repoPath, ["branch", "--list", "-r", `*/${branch}`]).pipe(
             Effect.map((r) => r.stdout.trim().length > 0)
           )
-          if (branchExists) {
-            yield* run(["worktree", "add", path, branch])
+          if (remoteExists) {
+            yield* run(repoPath, ["worktree", "add", path, branch])
           } else {
-            yield* run(["worktree", "add", "-b", branch, path, baseBranch ?? "HEAD"])
+            yield* run(repoPath, ["worktree", "add", "-b", branch, path, baseBranch ?? "HEAD"])
           }
-        }).pipe(Effect.asVoid),
+        }
+      })
 
-      worktreeRemove: (path, force) =>
-        run(["worktree", "remove", ...(force ? ["--force"] : []), path]).pipe(Effect.asVoid),
+    const worktreeRemove: (repoPath: string, path: string, force: boolean) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("GitService.worktreeRemove")(function* (repoPath, path, force) {
+        yield* run(repoPath, ["worktree", "remove", ...(force ? ["--force"] : []), path])
+      })
 
-      worktreeList: () =>
-        run(["worktree", "list", "--porcelain"]).pipe(
-          Effect.map((r) => {
-            const entries: Array<{ path: string; branch: string }> = []
-            let currentPath = ""
-            for (const line of r.stdout.split("\n")) {
-              if (line.startsWith("worktree ")) {
-                currentPath = line.slice("worktree ".length)
-              }
-              if (line.startsWith("branch refs/heads/")) {
-                entries.push({ path: currentPath, branch: line.slice("branch refs/heads/".length) })
-              }
-            }
-            return entries
-          })
-        ),
+    const worktreeList: (repoPath: string) => Effect.Effect<ReadonlyArray<{ path: string; branch: string }>, ShellExecError> =
+      Effect.fn("GitService.worktreeList")(function* (repoPath) {
+        const r = yield* run(repoPath, ["worktree", "list", "--porcelain"])
+        const entries: Array<{ path: string; branch: string }> = []
+        let currentPath = ""
+        for (const line of r.stdout.split("\n")) {
+          if (line.startsWith("worktree ")) {
+            currentPath = line.slice("worktree ".length)
+          }
+          if (line.startsWith("branch refs/heads/")) {
+            entries.push({ path: currentPath, branch: line.slice("branch refs/heads/".length) })
+          }
+        }
+        return entries
+      })
 
-      deleteBranch: (branch) =>
-        run(["branch", "-D", branch]).pipe(Effect.asVoid),
+    const deleteBranch: (repoPath: string, branch: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("GitService.deleteBranch")(function* (repoPath, branch) {
+        yield* run(repoPath, ["branch", "-D", branch])
+      })
 
-      repoRoot: () =>
-        run(["rev-parse", "--show-toplevel"]).pipe(Effect.map((r) => r.stdout.trim())),
+    const repoRoot: (repoPath: string) => Effect.Effect<string, ShellExecError> =
+      Effect.fn("GitService.repoRoot")(function* (repoPath) {
+        const r = yield* run(repoPath, ["rev-parse", "--show-toplevel"])
+        return r.stdout.trim()
+      })
 
-      currentBranch: () =>
-        run(["branch", "--show-current"]).pipe(Effect.map((r) => r.stdout.trim()))
-    })
-  })
-)
+    const currentBranch: (repoPath: string) => Effect.Effect<string, ShellExecError> =
+      Effect.fn("GitService.currentBranch")(function* (repoPath) {
+        const r = yield* run(repoPath, ["branch", "--show-current"])
+        return r.stdout.trim()
+      })
+
+    return { worktreeAdd, worktreeRemove, worktreeList, deleteBranch, repoRoot, currentBranch }
+  }),
+  dependencies: [ShellService.Default]
+}) {}

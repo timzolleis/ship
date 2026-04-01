@@ -1,59 +1,54 @@
-import type { PlatformError } from "@effect/platform/Error"
-import { Context, Effect, Layer } from "effect"
+import { Effect } from "effect"
+import type { ShellExecError } from "../errors.js"
 import { ShellService } from "./shell.js"
 
 // ---------------------------------------------------------------------------
 // DatabaseService
 // ---------------------------------------------------------------------------
 
-export class DatabaseService extends Context.Tag("DatabaseService")<
-  DatabaseService,
-  {
-    readonly createDb: (container: string, user: string, dbName: string) => Effect.Effect<void, PlatformError>
-    readonly dropDb: (container: string, user: string, dbName: string) => Effect.Effect<void, PlatformError>
-    readonly cloneDb: (container: string, user: string, sourceDb: string, targetDb: string) => Effect.Effect<void, PlatformError>
-    readonly dbExists: (container: string, user: string, dbName: string) => Effect.Effect<boolean, PlatformError>
-    readonly isContainerRunning: (container: string) => Effect.Effect<boolean>
-  }
->() {}
-
-export const DatabaseServiceLive = Layer.effect(
-  DatabaseService,
-  Effect.gen(function* () {
+export class DatabaseService extends Effect.Service<DatabaseService>()("DatabaseService", {
+  effect: Effect.gen(function* () {
     const shell = yield* ShellService
 
     const dockerExec = (container: string, args: ReadonlyArray<string>) =>
       shell.exec("docker", ["exec", container, ...args])
 
-    return DatabaseService.of({
-      createDb: (container, user, dbName) =>
-        dockerExec(container, ["createdb", "-U", user, dbName]).pipe(Effect.asVoid),
+    const createDb: (container: string, user: string, dbName: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("DatabaseService.createDb")(function* (container, user, dbName) {
+        yield* dockerExec(container, ["createdb", "-U", user, dbName])
+      })
 
-      dropDb: (container, user, dbName) =>
-        dockerExec(container, ["dropdb", "--if-exists", "-U", user, dbName]).pipe(Effect.asVoid),
+    const dropDb: (container: string, user: string, dbName: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("DatabaseService.dropDb")(function* (container, user, dbName) {
+        yield* dockerExec(container, ["dropdb", "--if-exists", "-U", user, dbName])
+      })
 
-      cloneDb: (container, user, sourceDb, targetDb) =>
-        Effect.gen(function* () {
-          yield* dockerExec(container, ["createdb", "-U", user, targetDb])
-          yield* shell.exec("docker", [
-            "exec", container, "bash", "-c",
-            `pg_dump -U ${user} ${sourceDb} | psql -U ${user} ${targetDb}`
-          ])
-        }).pipe(Effect.asVoid),
+    const cloneDb: (container: string, user: string, sourceDb: string, targetDb: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("DatabaseService.cloneDb")(function* (container, user, sourceDb, targetDb) {
+        yield* dockerExec(container, ["createdb", "-U", user, targetDb])
+        yield* shell.exec("docker", [
+          "exec", container, "bash", "-c",
+          `pg_dump -U ${user} ${sourceDb} | psql -U ${user} ${targetDb}`
+        ])
+      })
 
-      dbExists: (container, user, dbName) =>
-        dockerExec(container, ["psql", "-U", user, "-lqt"]).pipe(
-          Effect.map((r) =>
-            r.stdout.split("\n").some((line) => line.trim().startsWith(dbName))
-          ),
+    const dbExists: (container: string, user: string, dbName: string) => Effect.Effect<boolean, ShellExecError> =
+      Effect.fn("DatabaseService.dbExists")(function* (container, user, dbName) {
+        return yield* dockerExec(container, ["psql", "-U", user, "-lqt"]).pipe(
+          Effect.map((r) => r.stdout.split("\n").some((line) => line.trim().startsWith(dbName))),
           Effect.catchAll(() => Effect.succeed(false))
-        ),
+        )
+      })
 
-      isContainerRunning: (container) =>
-        shell.exec("docker", ["exec", container, "pg_isready", "-q"]).pipe(
+    const isContainerRunning: (container: string) => Effect.Effect<boolean> =
+      Effect.fn("DatabaseService.isContainerRunning")(function* (container) {
+        return yield* shell.exec("docker", ["exec", container, "pg_isready", "-q"]).pipe(
           Effect.map(() => true),
           Effect.catchAll(() => Effect.succeed(false))
         )
-    })
-  })
-)
+      })
+
+    return { createDb, dropDb, cloneDb, dbExists, isContainerRunning }
+  }),
+  dependencies: [ShellService.Default]
+}) {}

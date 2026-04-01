@@ -1,4 +1,5 @@
 import { Args, Command, Options, Prompt } from "@effect/cli"
+import { FileSystem } from "@effect/platform"
 import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
 import { ProxyService } from "../services/proxy.js"
@@ -90,35 +91,39 @@ export const downCommand = Command.make(
       // 1. Remove proxy route
       yield* proxy.removeRoute(workspace.proxyDomain).pipe(
         Effect.tap(() => Console.log(`  ${green("✓")} Proxy route     ${workspace.proxyDomain} removed`)),
-        Effect.catchAll(() =>
-          Console.log(`  ${yellow("⚠")} Proxy route     ${workspace.proxyDomain} not found`)
-        )
+        Effect.tapError(() => Console.log(`  ${yellow("⚠")} Proxy route     ${workspace.proxyDomain} not found`)),
+        Effect.catchAll(() => Effect.void)
       )
 
       // 2. Drop database
       const projectConfig = yield* config.getProject(project)
       yield* db.dropDb(projectConfig.database.container, projectConfig.database.user, workspace.dbName).pipe(
         Effect.tap(() => Console.log(`  ${green("✓")} Database        ${workspace.dbName} dropped`)),
-        Effect.catchAll(() =>
-          Console.log(`  ${yellow("⚠")} Database        ${workspace.dbName} could not be dropped`)
-        )
+        Effect.tapError(() => Console.log(`  ${yellow("⚠")} Database        ${workspace.dbName} could not be dropped`)),
+        Effect.catchAll(() => Effect.void)
       )
 
       if (!dbOnly) {
+        yield* Effect.logDebug("down", { repoPath: projectConfig.path, worktree: workspace.path, branch })
+
         // 3. Remove worktree
-        yield* git.worktreeRemove(workspace.path, force).pipe(
+        const fs = yield* FileSystem.FileSystem
+        yield* git.worktreeRemove(projectConfig.path, workspace.path, force).pipe(
           Effect.tap(() => Console.log(`  ${green("✓")} Worktree        ${workspace.path} removed`)),
-          Effect.catchAll(() =>
-            Console.log(`  ${yellow("⚠")} Worktree        ${workspace.path} not found`)
-          )
+          Effect.orElse(() =>
+            fs.remove(workspace.path, { recursive: true }).pipe(
+              Effect.tap(() => Console.log(`  ${green("✓")} Worktree        ${workspace.path} removed (force)`))
+            )
+          ),
+          Effect.tapError(() => Console.log(`  ${yellow("⚠")} Worktree        ${workspace.path} not found`)),
+          Effect.catchAll(() => Effect.void)
         )
 
         // 4. Delete branch
-        yield* git.deleteBranch(branch).pipe(
+        yield* git.deleteBranch(projectConfig.path, branch).pipe(
           Effect.tap(() => Console.log(`  ${green("✓")} Branch          ${branch} deleted`)),
-          Effect.catchAll(() =>
-            Console.log(`  ${yellow("⚠")} Branch          ${branch} not found`)
-          )
+          Effect.tapError(() => Console.log(`  ${yellow("⚠")} Branch          ${branch} not found`)),
+          Effect.catchAll(() => Effect.void)
         )
       }
 

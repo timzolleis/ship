@@ -8,6 +8,7 @@ import { initCommand } from "./commands/init.js"
 import { listCommand } from "./commands/list.js"
 import { openCommand } from "./commands/open.js"
 import { resetCommand } from "./commands/reset.js"
+import { syncCommand } from "./commands/sync.js"
 import { upCommand } from "./commands/up.js"
 import { proxyCommand } from "./commands/proxy/proxy.js"
 import { ShellService } from "./services/shell.js"
@@ -17,6 +18,7 @@ import { ConfigService } from "./services/config.js"
 import { ProxyService } from "./services/proxy.js"
 import { EditorService } from "./services/editor.js"
 import { EnvService } from "./services/env.js"
+import { SyncService } from "./services/sync.js"
 import { bold, dim, blue } from "./fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -53,9 +55,10 @@ const HELP = `
     ${blue("proxy next-port")}               Print next available port
 
   ${bold("Utilities")}
+    ${blue("sync")}   <project>              Fetch, pull main, migrate source db
     ${blue("reset")}  [--fresh]              Reset workspace database
     ${blue("open")}   [editor|url|db]        Open editor, browser, or psql
-    ${blue("gc")}     [--force] [--dry-run]  Clean up workspaces with merged PRs
+    ${blue("gc")}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces
 
   ${bold("Options")}
     --help, -h                    Show help for any command
@@ -78,7 +81,7 @@ const ship = Command.make("ship", {}, () => Console.log(HELP))
 const command = ship.pipe(
   Command.withSubcommands([
     createCommand, downCommand, gcCommand, initCommand,
-    listCommand, openCommand, resetCommand, upCommand, proxyCommand
+    listCommand, openCommand, resetCommand, syncCommand, upCommand, proxyCommand
   ])
 )
 
@@ -103,6 +106,7 @@ const MainLayer = Layer.mergeAll(
   ProxyService.Default,
   EditorService.Default,
   EnvService.Default,
+  SyncService.Default,
   LogLevelLive
 ).pipe(Layer.provideMerge(NodeContext.layer))
 

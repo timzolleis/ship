@@ -75,7 +75,32 @@ export class GitService extends Effect.Service<GitService>()("GitService", {
         return r.stdout.trim()
       })
 
-    return { worktreeAdd, worktreeRemove, worktreeList, deleteBranch, repoRoot, currentBranch }
+    const fetch: (repoPath: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("GitService.fetch")(function* (repoPath) {
+        yield* run(repoPath, ["fetch", "origin"])
+      })
+
+    const pullFfOnly: (repoPath: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("GitService.pullFfOnly")(function* (repoPath) {
+        yield* run(repoPath, ["pull", "--ff-only"])
+      })
+
+    const isDirty: (repoPath: string) => Effect.Effect<boolean, ShellExecError> =
+      Effect.fn("GitService.isDirty")(function* (repoPath) {
+        const r = yield* run(repoPath, ["status", "--porcelain"])
+        return r.stdout.trim().length > 0
+      })
+
+    const revParseHead: (repoPath: string) => Effect.Effect<string, ShellExecError> =
+      Effect.fn("GitService.revParseHead")(function* (repoPath) {
+        const r = yield* run(repoPath, ["rev-parse", "HEAD"])
+        return r.stdout.trim()
+      })
+
+    return {
+      worktreeAdd, worktreeRemove, worktreeList, deleteBranch, repoRoot, currentBranch,
+      fetch, pullFfOnly, isDirty, revParseHead
+    }
   }),
   dependencies: [ShellService.Default]
 }) {}

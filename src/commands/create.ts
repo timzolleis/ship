@@ -1,4 +1,4 @@
-import { Args, Command, Prompt } from "@effect/cli"
+import { Args, Command, Options, Prompt } from "@effect/cli"
 import { Path } from "@effect/platform"
 import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
@@ -47,11 +47,15 @@ const abbreviateValue = (value: string): string => {
 
 const projectArg = Args.text({ name: "project" })
 const branchArg = Args.text({ name: "branch" }).pipe(Args.optional)
+const baseOption = Options.text("base").pipe(
+  Options.withDescription("Base branch to create worktree from (defaults to HEAD)"),
+  Options.optional
+)
 
 export const createCommand = Command.make(
   "create",
-  { project: projectArg, branch: branchArg },
-  ({ project, branch: branchOpt }) =>
+  { project: projectArg, branch: branchArg, base: baseOption },
+  ({ project, branch: branchOpt, base: baseOpt }) =>
     Effect.gen(function* () {
       const config = yield* ConfigService
       const proxy = yield* ProxyService
@@ -89,7 +93,10 @@ export const createCommand = Command.make(
         return
       }
 
-      // 4. Compute paths and names
+      // 4. Resolve base branch
+      const baseBranch = Option.isSome(baseOpt) ? baseOpt.value : undefined
+
+      // 5. Compute paths and names
       const branchSlug = toBranchSlug(branch)
       const branchSlugSafe = toBranchSlugSafe(branch)
       const vars = { branch_slug: branchSlug, branch_slug_safe: branchSlugSafe, project }
@@ -103,8 +110,8 @@ export const createCommand = Command.make(
       yield* Console.log("")
       yield* Effect.logDebug("create", { repoPath: projectConfig.path, worktreeDir, branch, branchSlug, dirPattern: projectConfig.worktree.dirPattern })
 
-      // 5. Sync base (non-fatal)
-      const syncResult = yield* sync.sync(projectConfig).pipe(
+      // 6. Sync base (non-fatal)
+      const syncResult = yield* sync.sync(projectConfig, baseBranch).pipe(
         Effect.catchAll((e) =>
           Effect.succeed({
             fetched: false, pulled: false, headMoved: false,
@@ -112,8 +119,9 @@ export const createCommand = Command.make(
           } as import("../services/sync.js").SyncResult)
         )
       )
+      const baseLabel = baseBranch ?? "main"
       if (syncResult.headMoved) {
-        yield* Console.log(`  ${green("✓")} Base updated   ${dim("main fast-forwarded")}`)
+        yield* Console.log(`  ${green("✓")} Base updated   ${dim(`${baseLabel} fast-forwarded`)}`)
         if (syncResult.migrated) {
           yield* Console.log(`  ${green("✓")} Base migrated  ${dim(projectConfig.database.source)}`)
         }
@@ -123,12 +131,12 @@ export const createCommand = Command.make(
         yield* Console.log(`  ${dim("  · Base           already up to date")}`)
       }
 
-      // 6. Create git worktree
-      yield* git.worktreeAdd(projectConfig.path, worktreeDir, branch)
+      // 7. Create git worktree
+      yield* git.worktreeAdd(projectConfig.path, worktreeDir, branch, baseBranch)
       yield* Console.log(`  ${green("✓")} Branch         ${bold(branch)}`)
       yield* Console.log(`  ${green("✓")} Worktree       ${dim(worktreeDir)}`)
 
-      // 7. Clone database
+      // 8. Clone database
       const containerRunning = yield* db.isContainerRunning(projectConfig.database.container)
       if (!containerRunning) {
         yield* Console.log(`  ${red("✗")} Database container '${projectConfig.database.container}' is not running.`)
@@ -143,7 +151,7 @@ export const createCommand = Command.make(
       )
       yield* Console.log(`  ${green("✓")} Database       ${bold(dbName)} ${dim(`(cloned from ${projectConfig.database.source})`)}`)
 
-      // 8. Patch .env files
+      // 9. Patch .env files
       yield* Console.log("")
       yield* Console.log(`  Configuring environment...`)
       const port = yield* proxy.nextPort()
@@ -164,7 +172,7 @@ export const createCommand = Command.make(
         }
       }
 
-      // 9. Install dependencies
+      // 10. Install dependencies
       if (projectConfig.commands.install) {
         yield* Console.log("")
         yield* Console.log(`  Installing dependencies...`)
@@ -172,25 +180,25 @@ export const createCommand = Command.make(
         yield* Console.log(`  ${green("✓")} Dependencies   installed`)
       }
 
-      // 10. Generate (e.g., Prisma client)
+      // 11. Generate (e.g., Prisma client)
       if (projectConfig.commands.generate) {
         yield* shell.execInDir(worktreeDir, projectConfig.commands.generate)
       }
 
-      // 11. Run migrations
+      // 12. Run migrations
       if (projectConfig.commands.migrate) {
         yield* Console.log(`  Running migrations...`)
         yield* shell.execInDir(worktreeDir, projectConfig.commands.migrate)
         yield* Console.log(`  ${green("✓")} Migrations     applied`)
       }
 
-      // 12. Add proxy route
+      // 13. Add proxy route
       yield* proxy.addRoute(proxyDomain, port).pipe(
         Effect.catchAll(() => Effect.void)
       )
       yield* Console.log(`  ${green("✓")} Proxy          https://${bold(proxyDomain)} → :${blue(String(port))}`)
 
-      // 13. Register workspace
+      // 14. Register workspace
       yield* config.addWorkspace(
         new Workspace({
           project,
@@ -203,7 +211,7 @@ export const createCommand = Command.make(
         })
       )
 
-      // 14. Auto-open editor
+      // 15. Auto-open editor
       yield* Console.log("")
       const shipConfig = yield* config.loadConfig()
       let shouldOpen = shipConfig.autoOpenEditor

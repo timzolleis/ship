@@ -24,14 +24,40 @@ export class SyncService extends Effect.Service<SyncService>()("SyncService", {
     const shell = yield* ShellService
     const db = yield* DatabaseService
 
-    const sync: (config: ProjectConfig) => Effect.Effect<SyncResult, ShellExecError> =
-      Effect.fn("SyncService.sync")(function* (config) {
+    const sync: (config: ProjectConfig, baseBranch?: string) => Effect.Effect<SyncResult, ShellExecError> =
+      Effect.fn("SyncService.sync")(function* (config, baseBranch) {
         const repoPath = config.path
 
         // 1. Fetch origin
         yield* git.fetch(repoPath)
 
-        // 2. Fast-forward main (skip if dirty or non-ff)
+        // 2a. Custom base: update that branch ref directly (no checkout needed)
+        if (baseBranch) {
+          const before = yield* git.revParse(repoPath, baseBranch).pipe(
+            Effect.map((r) => r),
+            Effect.catchTag("ShellExecError", () => Effect.succeed(""))
+          )
+          const updateOk = yield* git.updateBranch(repoPath, baseBranch).pipe(
+            Effect.as(true),
+            Effect.catchTag("ShellExecError", () => Effect.succeed(false))
+          )
+          if (!updateOk) {
+            return {
+              fetched: true, pulled: false, headMoved: false,
+              installed: false, migrated: false,
+              skippedPull: `could not fast-forward ${baseBranch}`
+            }
+          }
+          const after = yield* git.revParse(repoPath, baseBranch).pipe(
+            Effect.catchTag("ShellExecError", () => Effect.succeed(""))
+          )
+          return {
+            fetched: true, pulled: true, headMoved: before !== after,
+            installed: false, migrated: false
+          }
+        }
+
+        // 2b. Default: fast-forward main (skip if dirty or non-ff)
         const dirty = yield* git.isDirty(repoPath)
         if (dirty) {
           return {

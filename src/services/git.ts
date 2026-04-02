@@ -97,9 +97,21 @@ export class GitService extends Effect.Service<GitService>()("GitService", {
         return r.stdout.trim()
       })
 
+    const revParse: (repoPath: string, ref: string) => Effect.Effect<string, ShellExecError> =
+      Effect.fn("GitService.revParse")(function* (repoPath, ref) {
+        const r = yield* run(repoPath, ["rev-parse", ref])
+        return r.stdout.trim()
+      })
+
+    /** Fast-forward a local branch ref to match origin (works for non-checked-out branches). */
+    const updateBranch: (repoPath: string, branch: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("GitService.updateBranch")(function* (repoPath, branch) {
+        yield* run(repoPath, ["fetch", "origin", `${branch}:${branch}`])
+      })
+
     return {
       worktreeAdd, worktreeRemove, worktreeList, deleteBranch, repoRoot, currentBranch,
-      fetch, pullFfOnly, isDirty, revParseHead
+      fetch, pullFfOnly, isDirty, revParseHead, revParse, updateBranch
     }
   }),
   dependencies: [ShellService.Default]

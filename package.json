@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "bun run src/main.ts",
     "build": "bun build src/main.ts --compile --minify --sourcemap --bytecode --outfile ship",
+    "install-bin": "cp ./ship ~/.local/bin/ship && codesign --sign - --force ~/.local/bin/ship",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

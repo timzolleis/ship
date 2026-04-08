@@ -48,7 +48,13 @@ export class DatabaseService extends Effect.Service<DatabaseService>()("Database
         )
       })
 
-    return { createDb, dropDb, cloneDb, dbExists, isContainerRunning }
+    const execSql: (container: string, user: string, dbName: string, sql: string) => Effect.Effect<string, ShellExecError> =
+      Effect.fn("DatabaseService.execSql")(function* (container, user, dbName, sql) {
+        const result = yield* dockerExec(container, ["psql", "-U", user, dbName, "-c", sql])
+        return result.stdout
+      })
+
+    return { createDb, dropDb, cloneDb, dbExists, isContainerRunning, execSql }
   }),
   dependencies: [ShellService.Default]
 }) {}

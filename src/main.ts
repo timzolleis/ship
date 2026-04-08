@@ -2,6 +2,7 @@ import { Command } from "@effect/cli"
 import { NodeContext, NodeRuntime } from "@effect/platform-node"
 import { Console, Effect, Layer, Logger, LogLevel } from "effect"
 import { createCommand } from "./commands/create.js"
+import { dbCommand } from "./commands/db.js"
 import { downCommand } from "./commands/down.js"
 import { gcCommand } from "./commands/gc.js"
 import { initCommand } from "./commands/init.js"
@@ -54,6 +55,9 @@ const HELP = `
     ${blue("proxy edit")}                    Open Caddyfile in $EDITOR
     ${blue("proxy next-port")}               Print next available port
 
+  ${bold("Database")}
+    ${blue("db exec")} <sql>                  Run SQL against workspace database
+
   ${bold("Utilities")}
     ${blue("sync")}   <project>              Fetch, pull main, migrate source db
     ${blue("reset")}  [--fresh]              Reset workspace database
@@ -80,7 +84,7 @@ const ship = Command.make("ship", {}, () => Console.log(HELP))
 
 const command = ship.pipe(
   Command.withSubcommands([
-    createCommand, downCommand, gcCommand, initCommand,
+    createCommand, dbCommand, downCommand, gcCommand, initCommand,
     listCommand, openCommand, resetCommand, syncCommand, upCommand, proxyCommand
   ])
 )

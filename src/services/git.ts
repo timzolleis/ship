@@ -109,8 +109,13 @@ export class GitService extends Effect.Service<GitService>()("GitService", {
         yield* run(repoPath, ["fetch", "origin", `${branch}:${branch}`])
       })
 
+    const deleteRemoteBranch: (repoPath: string, branch: string) => Effect.Effect<void, ShellExecError> =
+      Effect.fn("GitService.deleteRemoteBranch")(function* (repoPath, branch) {
+        yield* run(repoPath, ["push", "origin", "--delete", branch])
+      })
+
     return {
-      worktreeAdd, worktreeRemove, worktreeList, deleteBranch, repoRoot, currentBranch,
+      worktreeAdd, worktreeRemove, worktreeList, deleteBranch, deleteRemoteBranch, repoRoot, currentBranch,
       fetch, pullFfOnly, isDirty, revParseHead, revParse, updateBranch
     }
   }),

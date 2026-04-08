@@ -123,6 +123,9 @@ export const gcCommand = Command.make(
               ).pipe(Effect.catchAll(() => Effect.void))
               yield* git.worktreeRemove(projectConfig.path, ws.path, true).pipe(Effect.catchAll(() => Effect.void))
               yield* git.deleteBranch(projectConfig.path, ws.branch).pipe(Effect.catchAll(() => Effect.void))
+              yield* git.deleteRemoteBranch(projectConfig.path, ws.branch).pipe(
+                Effect.catchAll(() => Console.log(`  ${dim("ℹ")} Remote branch ${dim(ws.branch)} already deleted or not found`))
+              )
             }
             yield* config.removeWorkspace(ws.project, ws.branch)
 

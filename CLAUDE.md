@@ -41,6 +41,7 @@ src/
     ├── open.ts          # Open editor/url/db
     ├── reset.ts         # Reset workspace database
     ├── gc.ts            # Clean up merged-PR workspaces
+    ├── db.ts            # Database subcommands (exec)
     └── proxy/proxy.ts   # Proxy subcommands (start/stop/status/add/rm/trust/edit)
 ```
 

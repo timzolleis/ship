@@ -49,6 +49,7 @@ ship init --alias ep ...     # Non-interactive with flags
 ship create <project> [branch]     # Create workspace (or open existing)
 ship create ep tim/ep-241          # Full example
 ship create ep                     # Interactive branch prompt
+ship create ep tim/ep-241 --base develop  # Create from a specific base branch
 
 ship down [project] [branch]       # Tear down workspace
 ship down                          # Tear down current workspace (in worktree)
@@ -79,14 +80,32 @@ ship up --open                 # Also open browser
 
 Run inside a workspace. Ensures the proxy container is running, the route is registered, then executes the configured dev command.
 
-### Database Reset
+### Sync
+
+```bash
+ship sync ep                   # Fetch, pull main, install deps, migrate source DB
+```
+
+Keeps your base branch and source database up to date. Fetches from origin, fast-forwards main, runs install if deps changed, and applies migrations to the source database. Also runs automatically during `ship create`.
+
+### Database
 
 ```bash
 ship reset                     # Drop DB and re-clone from source
 ship reset --fresh             # Drop DB, create empty, run seed
+ship db exec "<sql>"           # Run SQL against workspace database
 ```
 
-Run inside a workspace. Useful when the DB gets into a bad state.
+Run inside a workspace.
+
+`ship reset` is useful when the DB gets into a bad state. `ship db exec` runs arbitrary SQL without needing to know the container, user, or database name — useful for quick queries, dropping tables, or debugging.
+
+```bash
+ship db exec "SELECT * FROM users LIMIT 5"
+ship db exec "\dt"                          # list tables
+ship db exec "DROP TABLE sessions"
+ship db exec "DELETE FROM sessions WHERE expires_at < now()"
+```
 
 ### Open Things
 
@@ -109,9 +128,10 @@ Editor detection finds the first available from: `$VISUAL`, `$EDITOR`, Zed, Curs
 ship gc                        # Check all workspaces for merged PRs
 ship gc --force                # Auto-teardown all merged, no prompts
 ship gc --dry-run              # Just show what would be cleaned up
+ship gc --sync                 # Also sync projects after cleanup
 ```
 
-Uses `gh pr view` to check PR status. Prompts to tear down each workspace with a merged PR.
+Uses `gh pr view` to check PR status. Prompts to tear down each workspace with a merged PR. With `--sync`, also fetches/pulls/migrates affected projects after cleanup.
 
 ### HTTPS Proxy (replaces localproxy)
 

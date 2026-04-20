@@ -75,28 +75,10 @@ export const createCommand = Command.make(
         ? branchOpt.value
         : yield* Prompt.text({ message: "Branch name:" })
 
-      // 3. Check if workspace already exists
-      const existing = yield* config.findWorkspace(project, branch)
-      if (Option.isSome(existing)) {
-        yield* Console.log("")
-        yield* Console.log(`  Already exists: ${bold(branch)} in ${dim(existing.value.path)}`)
-        yield* Console.log(`  Proxy: ${blue(`https://${existing.value.proxyDomain}`)} → :${existing.value.port}`)
-        yield* Console.log("")
-
-        const shouldOpen = yield* Prompt.confirm({
-          message: "Open in editor?",
-          initial: true
-        })
-        if (shouldOpen) {
-          yield* editor.open(existing.value.path)
-        }
-        return
-      }
-
-      // 4. Resolve base branch
+      // 3. Resolve base branch
       const baseBranch = Option.isSome(baseOpt) ? baseOpt.value : undefined
 
-      // 5. Compute paths and names
+      // 4. Compute paths and names (deterministic from project + branch)
       const branchSlug = toBranchSlug(branch)
       const branchSlugSafe = toBranchSlugSafe(branch)
       const vars = { branch_slug: branchSlug, branch_slug_safe: branchSlugSafe, project }
@@ -107,54 +89,125 @@ export const createCommand = Command.make(
       const proxyDomain = resolvePattern(projectConfig.worktree.proxyDomainPattern, vars)
       const dbName = resolvePattern(projectConfig.worktree.dbNamePattern, vars)
 
-      yield* Console.log("")
-      yield* Effect.logDebug("create", { repoPath: projectConfig.path, worktreeDir, branch, branchSlug, dirPattern: projectConfig.worktree.dirPattern })
-
-      // 6. Sync base (non-fatal)
-      const syncResult = yield* sync.sync(projectConfig, baseBranch).pipe(
-        Effect.catchAll((e) =>
-          Effect.succeed({
-            fetched: false, pulled: false, headMoved: false,
-            installed: false, migrated: false, skippedPull: e.message
-          } as import("../services/sync.js").SyncResult)
-        )
+      // 5. Probe current state of every resource
+      const existingWs = yield* config.findWorkspace(project, branch)
+      const worktrees = yield* git.worktreeList(projectConfig.path).pipe(
+        Effect.orElseSucceed(() => [] as ReadonlyArray<{ path: string; branch: string }>)
       )
-      const baseLabel = baseBranch ?? "main"
-      if (syncResult.headMoved) {
-        yield* Console.log(`  ${green("✓")} Base updated   ${dim(`${baseLabel} fast-forwarded`)}`)
-        if (syncResult.migrated) {
-          yield* Console.log(`  ${green("✓")} Base migrated  ${dim(projectConfig.database.source)}`)
-        }
-      } else if (syncResult.skippedPull) {
-        yield* Console.log(`  ${yellow("⚠")} Base sync      ${dim(syncResult.skippedPull)}`)
-      } else if (syncResult.fetched) {
-        yield* Console.log(`  ${dim("  · Base           already up to date")}`)
+      const worktreeExists = worktrees.some((w) => w.path === worktreeDir)
+
+      const containerRunning = yield* db.isContainerRunning(projectConfig.database.container)
+      const dbAlreadyExists = containerRunning
+        ? yield* db.dbExists(projectConfig.database.container, projectConfig.database.user, dbName).pipe(
+            Effect.orElseSucceed(() => false)
+          )
+        : false
+
+      const existingRoutes = yield* proxy.getRoutes().pipe(
+        Effect.orElseSucceed(() => [] as ReadonlyArray<import("../services/proxy.js").Route>)
+      )
+      const existingRoute = existingRoutes.find((r) => r.domain === proxyDomain)
+
+      // 6. Pick port: reuse from registered workspace or existing route, else allocate fresh
+      const port = Option.isSome(existingWs)
+        ? existingWs.value.port
+        : existingRoute
+          ? existingRoute.port
+          : yield* proxy.nextPort()
+
+      // 7. Fully-provisioned short-circuit → just open the editor
+      const allPresent =
+        Option.isSome(existingWs) && worktreeExists && dbAlreadyExists && !!existingRoute
+      if (allPresent) {
+        yield* Console.log("")
+        yield* Console.log(`  Already exists: ${bold(branch)} in ${dim(existingWs.value.path)}`)
+        yield* Console.log(`  Proxy: ${blue(`https://${existingWs.value.proxyDomain}`)} → :${existingWs.value.port}`)
+        yield* Console.log("")
+        const shouldOpen = yield* Prompt.confirm({ message: "Open in editor?", initial: true })
+        if (shouldOpen) yield* editor.open(existingWs.value.path)
+        return
       }
 
-      // 7. Create git worktree
-      yield* git.worktreeAdd(projectConfig.path, worktreeDir, branch, baseBranch)
-      yield* Console.log(`  ${green("✓")} Branch         ${bold(branch)}`)
-      yield* Console.log(`  ${green("✓")} Worktree       ${dim(worktreeDir)}`)
-
-      // 8. Clone database
-      const containerRunning = yield* db.isContainerRunning(projectConfig.database.container)
+      // 8. Container must be running for db work
       if (!containerRunning) {
         yield* Console.log(`  ${red("✗")} Database container '${projectConfig.database.container}' is not running.`)
         yield* Console.log(`    Start it first, then run this command again.`)
         return
       }
-      yield* db.cloneDb(
-        projectConfig.database.container,
-        projectConfig.database.user,
-        projectConfig.database.source,
-        dbName
-      )
-      yield* Console.log(`  ${green("✓")} Database       ${bold(dbName)} ${dim(`(cloned from ${projectConfig.database.source})`)}`)
 
-      // 9. Patch .env files
+      yield* Console.log("")
+      yield* Effect.logDebug("create", { repoPath: projectConfig.path, worktreeDir, branch, branchSlug, dirPattern: projectConfig.worktree.dirPattern })
+
+      const resuming =
+        Option.isSome(existingWs) || worktreeExists || dbAlreadyExists || !!existingRoute
+      if (resuming) {
+        yield* Console.log(`  ${yellow("↻")} Resuming partial setup...`)
+      }
+
+      // 9. Register workspace up front — so `ship down` can clean partial state
+      if (Option.isNone(existingWs)) {
+        yield* config.addWorkspace(
+          new Workspace({
+            project,
+            branch,
+            path: worktreeDir,
+            port,
+            dbName,
+            proxyDomain,
+            created: new Date().toISOString().split("T")[0]!,
+          })
+        )
+      }
+
+      // 10. Sync base (skip if worktree already on disk — don't move refs behind it)
+      if (!worktreeExists) {
+        const syncResult = yield* sync.sync(projectConfig, baseBranch).pipe(
+          Effect.catchAll((e) =>
+            Effect.succeed({
+              fetched: false, pulled: false, headMoved: false,
+              installed: false, migrated: false, skippedPull: e.message
+            } as import("../services/sync.js").SyncResult)
+          )
+        )
+        const baseLabel = baseBranch ?? "main"
+        if (syncResult.headMoved) {
+          yield* Console.log(`  ${green("✓")} Base updated   ${dim(`${baseLabel} fast-forwarded`)}`)
+          if (syncResult.migrated) {
+            yield* Console.log(`  ${green("✓")} Base migrated  ${dim(projectConfig.database.source)}`)
+          }
+        } else if (syncResult.skippedPull) {
+          yield* Console.log(`  ${yellow("⚠")} Base sync      ${dim(syncResult.skippedPull)}`)
+        } else if (syncResult.fetched) {
+          yield* Console.log(`  ${dim("  · Base           already up to date")}`)
+        }
+      }
+
+      // 11. Git worktree
+      if (worktreeExists) {
+        yield* Console.log(`  ${dim("•")} Branch         ${bold(branch)} ${dim("(already present)")}`)
+        yield* Console.log(`  ${dim("•")} Worktree       ${dim(worktreeDir)} ${dim("(already present)")}`)
+      } else {
+        yield* git.worktreeAdd(projectConfig.path, worktreeDir, branch, baseBranch)
+        yield* Console.log(`  ${green("✓")} Branch         ${bold(branch)}`)
+        yield* Console.log(`  ${green("✓")} Worktree       ${dim(worktreeDir)}`)
+      }
+
+      // 12. Database
+      if (dbAlreadyExists) {
+        yield* Console.log(`  ${dim("•")} Database       ${bold(dbName)} ${dim("(already present)")}`)
+      } else {
+        yield* db.cloneDb(
+          projectConfig.database.container,
+          projectConfig.database.user,
+          projectConfig.database.source,
+          dbName
+        )
+        yield* Console.log(`  ${green("✓")} Database       ${bold(dbName)} ${dim(`(cloned from ${projectConfig.database.source})`)}`)
+      }
+
+      // 13. Patch .env files (idempotent — rewrites from source template)
       yield* Console.log("")
       yield* Console.log(`  Configuring environment...`)
-      const port = yield* proxy.nextPort()
       const patchResults = yield* env.patchEnvFiles(
         projectConfig.path,
         worktreeDir,
@@ -172,7 +225,7 @@ export const createCommand = Command.make(
         }
       }
 
-      // 10. Install dependencies
+      // 14. Install dependencies
       if (projectConfig.commands.install) {
         yield* Console.log("")
         yield* Console.log(`  Installing dependencies...`)
@@ -180,36 +233,25 @@ export const createCommand = Command.make(
         yield* Console.log(`  ${green("✓")} Dependencies   installed`)
       }
 
-      // 11. Generate (e.g., Prisma client)
+      // 15. Generate (e.g., Prisma client)
       if (projectConfig.commands.generate) {
         yield* shell.execInDir(worktreeDir, projectConfig.commands.generate)
       }
 
-      // 12. Run migrations
+      // 16. Run migrations
       if (projectConfig.commands.migrate) {
         yield* Console.log(`  Running migrations...`)
         yield* shell.execInDir(worktreeDir, projectConfig.commands.migrate)
         yield* Console.log(`  ${green("✓")} Migrations     applied`)
       }
 
-      // 13. Add proxy route
-      yield* proxy.addRoute(proxyDomain, port).pipe(
-        Effect.catchAll(() => Effect.void)
-      )
-      yield* Console.log(`  ${green("✓")} Proxy          https://${bold(proxyDomain)} → :${blue(String(port))}`)
-
-      // 14. Register workspace
-      yield* config.addWorkspace(
-        new Workspace({
-          project,
-          branch,
-          path: worktreeDir,
-          port,
-          dbName,
-          proxyDomain,
-          created: new Date().toISOString().split("T")[0]!,
-        })
-      )
+      // 17. Proxy route
+      if (existingRoute) {
+        yield* Console.log(`  ${dim("•")} Proxy          https://${bold(proxyDomain)} → :${blue(String(port))} ${dim("(already present)")}`)
+      } else {
+        yield* proxy.addRoute(proxyDomain, port).pipe(Effect.catchAll(() => Effect.void))
+        yield* Console.log(`  ${green("✓")} Proxy          https://${bold(proxyDomain)} → :${blue(String(port))}`)
+      }
 
       // 15. Auto-open editor
       yield* Console.log("")

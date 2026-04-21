@@ -46,7 +46,7 @@ ship init --alias ep ...     # Non-interactive with flags
 ### Workspace Lifecycle
 
 ```bash
-ship create <project> [branch]     # Create workspace (or open existing)
+ship create <project> [branch]     # Create workspace (idempotent — resumes on failure, opens if already present)
 ship create ep tim/ep-241          # Full example
 ship create ep                     # Interactive branch prompt
 ship create ep tim/ep-241 --base develop  # Create from a specific base branch
@@ -131,7 +131,7 @@ ship gc --dry-run              # Just show what would be cleaned up
 ship gc --sync                 # Also sync projects after cleanup
 ```
 
-Uses `gh pr view` to check PR status. Prompts to tear down each workspace with a merged PR. With `--sync`, also fetches/pulls/migrates affected projects after cleanup.
+Uses `gh pr view` to check PR status. Prompts to tear down each workspace with a merged PR — teardown also deletes the remote branch. With `--sync`, also fetches/pulls/migrates affected projects after cleanup.
 
 ### HTTPS Proxy (replaces localproxy)
 

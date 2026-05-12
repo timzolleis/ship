@@ -17,7 +17,8 @@
     "effect": "latest"
   },
   "devDependencies": {
-    "typescript": "^5.8.0",
-    "@types/node": "^22.0.0"
+    "@effect/language-service": "^0.85.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
   }
 }

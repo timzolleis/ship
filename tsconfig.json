@@ -13,7 +13,12 @@
     "sourceMap": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": false,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+      },
+    ],
   },
-  "include": ["src"]
+  "include": ["src"],
 }

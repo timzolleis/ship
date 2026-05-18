@@ -1,0 +1,67 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - { os: darwin, arch: arm64 }
+          - { os: darwin, arch: x64 }
+    outputs:
+      sha: ${{ steps.sha.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile || bun install
+
+      - id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
+        run: |
+          bun build src/main.ts \
+            --compile \
+            --minify \
+            --sourcemap \
+            --bytecode \
+            --target=bun-${{ matrix.target.os }}-${{ matrix.target.arch }} \
+            --define SHIP_VERSION_CONST="\"${{ steps.sha.outputs.short }}\"" \
+            --outfile ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release ${{ needs.build.outputs.sha }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.sha }}
+          name: ${{ needs.build.outputs.sha }}
+          target_commitish: ${{ github.sha }}
+          files: dist/ship-*
+          fail_on_unmatched_files: true

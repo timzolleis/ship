@@ -105,3 +105,43 @@ export class CertNotFoundError extends Schema.TaggedError<CertNotFoundError>()(
     return "No CA cert yet. Start the proxy and make a request first."
   }
 }
+
+// ---------------------------------------------------------------------------
+// Updater errors
+// ---------------------------------------------------------------------------
+
+export class UpdateCheckError extends Schema.TaggedError<UpdateCheckError>()(
+  "UpdateCheckError",
+  { detail: Schema.String }
+) {
+  get message() {
+    return `Failed to check for updates: ${this.detail}`
+  }
+}
+
+export class UpdateDownloadError extends Schema.TaggedError<UpdateDownloadError>()(
+  "UpdateDownloadError",
+  { url: Schema.String, detail: Schema.String }
+) {
+  get message() {
+    return `Failed to download '${this.url}': ${this.detail}`
+  }
+}
+
+export class UpdateInstallError extends Schema.TaggedError<UpdateInstallError>()(
+  "UpdateInstallError",
+  { detail: Schema.String }
+) {
+  get message() {
+    return `Failed to install update: ${this.detail}`
+  }
+}
+
+export class UnsupportedPlatformError extends Schema.TaggedError<UnsupportedPlatformError>()(
+  "UnsupportedPlatformError",
+  { platform: Schema.String, arch: Schema.String }
+) {
+  get message() {
+    return `Unsupported platform: ${this.platform}/${this.arch}. Pre-built binaries are only published for darwin-arm64 and darwin-x64.`
+  }
+}

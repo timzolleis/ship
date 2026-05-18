@@ -9,8 +9,10 @@ import { indexCommand } from "./commands/index.js"
 import { initCommand } from "./commands/init.js"
 import { listCommand } from "./commands/list.js"
 import { openCommand } from "./commands/open.js"
+import { refreshUpdateCacheCommand } from "./commands/refresh-update-cache.js"
 import { resetCommand } from "./commands/reset.js"
 import { syncCommand } from "./commands/sync.js"
+import { updateCommand } from "./commands/update.js"
 import { upCommand } from "./commands/up.js"
 import { proxyCommand } from "./commands/proxy/proxy.js"
 import { ShellService } from "./services/shell.js"
@@ -21,6 +23,8 @@ import { ProxyService } from "./services/proxy.js"
 import { EditorService } from "./services/editor.js"
 import { EnvService } from "./services/env.js"
 import { SyncService } from "./services/sync.js"
+import { UpdaterService } from "./services/updater.js"
+import { VERSION } from "./version.js"
 import { bold, dim, blue } from "./fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -65,6 +69,7 @@ const HELP = `
     ${blue("open")}   [editor|url|db]        Open editor, browser, or psql
     ${blue("index")}  [project] [--all] [--dry-run]   Register pre-existing worktrees
     ${blue("gc")}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces
+    ${blue("update")}                        Download and install the latest release
 
   ${bold("Options")}
     --help, -h                    Show help for any command
@@ -87,13 +92,14 @@ const ship = Command.make("ship", {}, () => Console.log(HELP))
 const command = ship.pipe(
   Command.withSubcommands([
     createCommand, dbCommand, downCommand, gcCommand, indexCommand, initCommand,
-    listCommand, openCommand, resetCommand, syncCommand, upCommand, proxyCommand
+    listCommand, openCommand, refreshUpdateCacheCommand, resetCommand, syncCommand,
+    updateCommand, upCommand, proxyCommand
   ])
 )
 
 const cli = Command.run(command, {
   name: "ship",
-  version: "0.1.0"
+  version: VERSION
 })
 
 // ---------------------------------------------------------------------------
@@ -113,6 +119,7 @@ const MainLayer = Layer.mergeAll(
   EditorService.Default,
   EnvService.Default,
   SyncService.Default,
+  UpdaterService.Default,
   LogLevelLive
 ).pipe(Layer.provideMerge(NodeContext.layer))
 
@@ -120,7 +127,14 @@ const MainLayer = Layer.mergeAll(
 // Run
 // ---------------------------------------------------------------------------
 
+const postRun = Effect.gen(function* () {
+  const updater = yield* UpdaterService
+  yield* updater.notifyIfAvailable()
+  yield* updater.spawnBackgroundRefreshIfStale()
+}).pipe(Effect.ignore)
+
 Effect.suspend(() => cli(process.argv)).pipe(
+  Effect.ensuring(postRun),
   Effect.provide(MainLayer),
   NodeRuntime.runMain
 )

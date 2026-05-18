@@ -1,10 +1,10 @@
 import { Args, Command, Prompt } from "@effect/cli"
-import type { Terminal } from "@effect/platform/Terminal"
 import { Console, Effect } from "effect"
 import { ConfigService } from "../services/config.js"
 import { EditorService } from "../services/editor.js"
 import { ShellService } from "../services/shell.js"
 import type { Workspace } from "../schema/workspace.js"
+import { NoActiveWorkspacesError, WorkspaceNotFoundError } from "../errors.js"
 import { bold, red, dim } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -16,7 +16,7 @@ const TARGETS = ["editor", "url", "db"] as const
 const resolveWorkspace = (
   arg: string | undefined,
   workspaces: ReadonlyArray<Workspace>
-): Effect.Effect<Workspace, Error, Terminal> =>
+) =>
   Effect.gen(function* () {
     const cwd = process.cwd()
 
@@ -28,9 +28,7 @@ const resolveWorkspace = (
         workspaces.find((w) => w.branch.endsWith(`/${arg}`)) ??
         workspaces.find((w) => w.branch.includes(arg))
       if (match) return match
-      return yield* Effect.fail(
-        new Error(`No workspace found for branch '${arg}'. Run 'ship ls' to see active workspaces.`)
-      )
+      return yield* new WorkspaceNotFoundError({ branch: arg })
     }
 
     // 2. Try to detect from cwd
@@ -39,9 +37,7 @@ const resolveWorkspace = (
 
     // 3. Interactive picker
     if (workspaces.length === 0) {
-      return yield* Effect.fail(
-        new Error("No active workspaces. Create one with 'ship create <project> <branch>'.")
-      )
+      return yield* new NoActiveWorkspacesError()
     }
 
     const selected = yield* Prompt.select({

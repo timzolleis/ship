@@ -145,3 +145,25 @@ export class UnsupportedPlatformError extends Schema.TaggedError<UnsupportedPlat
     return `Unsupported platform: ${this.platform}/${this.arch}. Pre-built binaries are only published for darwin-arm64 and darwin-x64.`
   }
 }
+
+// ---------------------------------------------------------------------------
+// Workspace resolution errors
+// ---------------------------------------------------------------------------
+
+export class WorkspaceNotFoundError extends Schema.TaggedError<WorkspaceNotFoundError>()(
+  "WorkspaceNotFoundError",
+  { branch: Schema.String }
+) {
+  get message() {
+    return `No workspace found for branch '${this.branch}'. Run 'ship ls' to see active workspaces.`
+  }
+}
+
+export class NoActiveWorkspacesError extends Schema.TaggedError<NoActiveWorkspacesError>()(
+  "NoActiveWorkspacesError",
+  {}
+) {
+  get message() {
+    return "No active workspaces. Create one with 'ship create <project> <branch>'."
+  }
+}

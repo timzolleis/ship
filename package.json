@@ -7,7 +7,7 @@
     "dev": "bun run src/main.ts",
     "build": "bun build src/main.ts --compile --minify --sourcemap --bytecode --define SHIP_VERSION_CONST=\"\\\"$(git rev-parse --short HEAD)\\\"\" --outfile ship",
     "install-bin": "cp ./ship ~/.local/bin/ship && codesign --sign - --force ~/.local/bin/ship",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && effect-language-service diagnostics --project tsconfig.json --format pretty"
   },
   "dependencies": {
     "@effect/cli": "latest",

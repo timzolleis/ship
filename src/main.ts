@@ -5,6 +5,7 @@ import { createCommand } from "./commands/create.js"
 import { dbCommand } from "./commands/db.js"
 import { downCommand } from "./commands/down.js"
 import { gcCommand } from "./commands/gc.js"
+import { indexCommand } from "./commands/index.js"
 import { initCommand } from "./commands/init.js"
 import { listCommand } from "./commands/list.js"
 import { openCommand } from "./commands/open.js"
@@ -62,6 +63,7 @@ const HELP = `
     ${blue("sync")}   <project>              Fetch, pull main, migrate source db
     ${blue("reset")}  [--fresh]              Reset workspace database
     ${blue("open")}   [editor|url|db]        Open editor, browser, or psql
+    ${blue("index")}  [project] [--all] [--dry-run]   Register pre-existing worktrees
     ${blue("gc")}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces
 
   ${bold("Options")}
@@ -84,7 +86,7 @@ const ship = Command.make("ship", {}, () => Console.log(HELP))
 
 const command = ship.pipe(
   Command.withSubcommands([
-    createCommand, dbCommand, downCommand, gcCommand, initCommand,
+    createCommand, dbCommand, downCommand, gcCommand, indexCommand, initCommand,
     listCommand, openCommand, resetCommand, syncCommand, upCommand, proxyCommand
   ])
 )

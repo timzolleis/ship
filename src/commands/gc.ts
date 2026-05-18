@@ -105,36 +105,50 @@ export const gcCommand = Command.make(
       }
 
       if (dryRun) {
-        for (const { ws, prLabel } of merged) {
-          yield* Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${yellow("would tear down")}`)
-        }
+        yield* Effect.forEach(merged, ({ ws, prLabel }) =>
+          Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${yellow("would tear down")}`)
+        )
         cleaned = merged.length
       } else {
-        for (const { ws, projectConfig, prLabel } of merged) {
-          const shouldClean = force || (yield* Prompt.confirm({
-            message: `${ws.project}/${ws.branch} — ${prLabel}. Tear down?`
-          }))
+        // Collect approvals serially (prompts must be sequential) before any teardown.
+        const toClean = force
+          ? merged
+          : yield* Effect.filter(merged, (cw) =>
+              Prompt.confirm({
+                message: `${cw.ws.project}/${cw.ws.branch} — ${cw.prLabel}. Tear down?`
+              }).pipe(
+                Effect.tap((ok) =>
+                  ok ? Effect.void : Console.log(
+                    `  ${cw.ws.project}  ${bold(cw.ws.branch.padEnd(22))} ${cw.prLabel}  → ${dim("skipped")}`
+                  )
+                )
+              )
+            )
 
-          if (shouldClean) {
-            yield* proxy.removeRoute(ws.proxyDomain).pipe(Effect.catchAll(() => Effect.void))
+        const teardown = ({ ws, projectConfig, prLabel }: CheckedWorkspace) =>
+          Effect.gen(function* () {
+            yield* Effect.ignore(proxy.removeRoute(ws.proxyDomain))
             if (projectConfig) {
-              yield* db.dropDb(
-                projectConfig.database.container, projectConfig.database.user, ws.dbName
-              ).pipe(Effect.catchAll(() => Effect.void))
-              yield* git.worktreeRemove(projectConfig.path, ws.path, true).pipe(Effect.catchAll(() => Effect.void))
-              yield* git.deleteBranch(projectConfig.path, ws.branch).pipe(Effect.catchAll(() => Effect.void))
+              yield* Effect.ignore(db.dropDb(projectConfig.database.container, projectConfig.database.user, ws.dbName))
+              yield* Effect.ignore(git.worktreeRemove(projectConfig.path, ws.path, true))
+              yield* Effect.ignore(git.deleteBranch(projectConfig.path, ws.branch))
               yield* git.deleteRemoteBranch(projectConfig.path, ws.branch).pipe(
                 Effect.catchAll(() => Console.log(`  ${dim("ℹ")} Remote branch ${dim(ws.branch)} already deleted or not found`))
               )
             }
-            yield* config.removeWorkspace(ws.project, ws.branch)
-
             yield* Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${green("cleaned up")}`)
-            cleaned++
-          } else {
-            yield* Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${dim("skipped")}`)
-          }
+          })
+
+        yield* Effect.forEach(toClean, teardown, { concurrency: "unbounded" })
+
+        // Batch a single workspaces.json write to avoid read-modify-write races.
+        if (toClean.length > 0) {
+          const removed = new Set(toClean.map((c) => `${c.ws.project}\0${c.ws.branch}`))
+          const current = yield* config.loadWorkspaces()
+          yield* config.saveWorkspaces(current.filter((w) => !removed.has(`${w.project}\0${w.branch}`)))
         }
+
+        cleaned = toClean.length
       }
 
       yield* Console.log("")

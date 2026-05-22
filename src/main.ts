@@ -23,6 +23,7 @@ import { ProxyService } from "./services/proxy.js"
 import { EditorService } from "./services/editor.js"
 import { EnvService } from "./services/env.js"
 import { SyncService } from "./services/sync.js"
+import { ClaudeService } from "./services/claude.js"
 import { UpdaterService } from "./services/updater.js"
 import { VERSION } from "./version.js"
 import { bold, dim, blue } from "./fmt.js"
@@ -119,6 +120,7 @@ const MainLayer = Layer.mergeAll(
   EditorService.Default,
   EnvService.Default,
   SyncService.Default,
+  ClaudeService.Default,
   UpdaterService.Default,
   LogLevelLive
 ).pipe(Layer.provideMerge(NodeContext.layer))

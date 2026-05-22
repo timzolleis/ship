@@ -71,6 +71,8 @@ ship ls ep                         # List workspaces for a project
 6. Registers the workspace in `~/.config/ship/workspaces.json`
 7. Opens the workspace in your editor (asks on first run, remembers preference)
 
+Teardown (`ship down`, `ship gc`) also removes the worktree's Claude Code conversation directory at `~/.claude/projects/<slugified-path>/` so transcripts don't accumulate for branches that no longer exist.
+
 ### Dev Server
 
 ```bash
@@ -252,7 +254,7 @@ The Caddy CA is self-signed. Run `ship proxy trust` once to add it to your macOS
 ```
 ship init          →  writes ~/.config/ship/config.json
 ship create        →  creates worktree + DB + env + proxy route + workspaces.json entry
-ship down          →  removes proxy route + drops DB + removes worktree + deletes branch
+ship down          →  removes proxy route + drops DB + removes worktree + deletes branch + clears Claude convos
 ship down --db-only →  only drops DB (useful for resetting state)
 ```
 

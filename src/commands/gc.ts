@@ -7,6 +7,7 @@ import { ShellService } from "../services/shell.js"
 import { GitService } from "../services/git.js"
 import { DatabaseService } from "../services/database.js"
 import { SyncService } from "../services/sync.js"
+import { ClaudeService } from "../services/claude.js"
 import { bold, dim, green, red, yellow, blue } from "../fmt.js"
 import type { Workspace } from "../schema/workspace.js"
 
@@ -42,6 +43,7 @@ export const gcCommand = Command.make(
       const git = yield* GitService
       const db = yield* DatabaseService
       const syncSvc = yield* SyncService
+      const claude = yield* ClaudeService
 
       const workspaces = yield* config.loadWorkspaces()
 
@@ -136,6 +138,7 @@ export const gcCommand = Command.make(
                 Effect.catchAll(() => Console.log(`  ${dim("ℹ")} Remote branch ${dim(ws.branch)} already deleted or not found`))
               )
             }
+            yield* claude.removeProjectConvo(ws.path)
             yield* Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${green("cleaned up")}`)
           })
 

@@ -5,7 +5,8 @@ import { ConfigService } from "../services/config.js"
 import { ProxyService } from "../services/proxy.js"
 import { GitService } from "../services/git.js"
 import { DatabaseService } from "../services/database.js"
-import { bold, green, red, yellow } from "../fmt.js"
+import { ClaudeService } from "../services/claude.js"
+import { bold, dim, green, red, yellow } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
 // ship down [project] [branch] [--force] [--db-only]
@@ -25,6 +26,7 @@ export const downCommand = Command.make(
       const proxy = yield* ProxyService
       const git = yield* GitService
       const db = yield* DatabaseService
+      const claude = yield* ClaudeService
 
       // Resolve project and branch
       let project: string
@@ -125,9 +127,18 @@ export const downCommand = Command.make(
           Effect.tapError(() => Console.log(`  ${yellow("⚠")} Branch          ${branch} not found`)),
           Effect.catchAll(() => Effect.void)
         )
+
+        // 5. Remove Claude Code conversation transcripts for this worktree
+        yield* claude.removeProjectConvo(workspace.path).pipe(
+          Effect.tap((removed) =>
+            removed
+              ? Console.log(`  ${green("✓")} Claude convos   ${dim(workspace.path)} cleared`)
+              : Effect.void
+          )
+        )
       }
 
-      // 5. Remove from workspace registry
+      // 6. Remove from workspace registry
       yield* config.removeWorkspace(project, branch)
 
       yield* Console.log("")

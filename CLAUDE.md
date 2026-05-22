@@ -31,7 +31,8 @@ src/
 │   ├── config.ts        # ConfigService — ~/.config/ship/ config + workspace registry
 │   ├── proxy.ts         # ProxyService — Caddy reverse proxy (depends on Shell)
 │   ├── editor.ts        # EditorService — detect & open editors (depends on Shell, Config)
-│   └── env.ts           # patchEnvFiles() — .env copying/patching (standalone function)
+│   ├── env.ts           # patchEnvFiles() — .env copying/patching (standalone function)
+│   └── claude.ts        # ClaudeService — clears ~/.claude/projects/<slug>/ on teardown
 └── commands/
     ├── init.ts          # Register project (interactive)
     ├── create.ts        # Create workspace (worktree + db + env + proxy)

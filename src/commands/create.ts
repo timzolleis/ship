@@ -45,7 +45,7 @@ const abbreviateValue = (value: string): string => {
 // ship create <project> [branch]
 // ---------------------------------------------------------------------------
 
-const projectArg = Args.text({ name: "project" })
+const projectArg = Args.text({ name: "project" }).pipe(Args.optional)
 const branchArg = Args.text({ name: "branch" }).pipe(Args.optional)
 const baseOption = Options.text("base").pipe(
   Options.withDescription("Base branch to create worktree from (defaults to HEAD)"),
@@ -55,7 +55,7 @@ const baseOption = Options.text("base").pipe(
 export const createCommand = Command.make(
   "create",
   { project: projectArg, branch: branchArg, base: baseOption },
-  ({ project, branch: branchOpt, base: baseOpt }) =>
+  ({ project: projectOpt, branch: branchOpt, base: baseOpt }) =>
     Effect.gen(function* () {
       const config = yield* ConfigService
       const proxy = yield* ProxyService
@@ -67,7 +67,30 @@ export const createCommand = Command.make(
       const env = yield* EnvService
       const pathSvc = yield* Path.Path
 
-      // 1. Resolve project config
+      // 1. Resolve project (prompt if not specified)
+      let project: string
+      if (Option.isSome(projectOpt)) {
+        project = projectOpt.value
+      } else {
+        const shipConfig = yield* config.loadConfig()
+        const aliases = Object.keys(shipConfig.projects)
+        if (aliases.length === 0) {
+          yield* Console.log("")
+          yield* Console.log(`  ${red("✗")} No projects registered.`)
+          yield* Console.log(`  ${dim("Register one with: ship init")}`)
+          yield* Console.log("")
+          return
+        }
+        project = yield* Prompt.select({
+          message: "Select a project",
+          choices: aliases.map((alias) => ({
+            title: alias,
+            value: alias,
+            description: shipConfig.projects[alias]!.path
+          }))
+        })
+      }
+
       const projectConfig = yield* config.getProject(project)
 
       // 2. Resolve branch

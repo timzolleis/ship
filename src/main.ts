@@ -9,6 +9,7 @@ import { indexCommand } from "./commands/index.js"
 import { initCommand } from "./commands/init.js"
 import { listCommand } from "./commands/list.js"
 import { openCommand } from "./commands/open.js"
+import { projectsCommand } from "./commands/projects.js"
 import { refreshUpdateCacheCommand } from "./commands/refresh-update-cache.js"
 import { resetCommand } from "./commands/reset.js"
 import { syncCommand } from "./commands/sync.js"
@@ -41,9 +42,10 @@ const HELP = `
   ${bold("Project Setup")}
     ${blue("init")}                          Register current directory as a project
     ${blue("init")} --alias ep ...           Non-interactive with flags
+    ${blue("projects")}                      List registered projects
 
   ${bold("Workspace Lifecycle")}
-    ${blue("create")} <project> [branch]     Create or resume a workspace
+    ${blue("create")} [project] [branch]     Create or resume a workspace
     ${blue("down")}   [project] [branch]     Tear down a workspace
     ${blue("ls")}     [project]              List active workspaces
 
@@ -93,8 +95,8 @@ const ship = Command.make("ship", {}, () => Console.log(HELP))
 const command = ship.pipe(
   Command.withSubcommands([
     createCommand, dbCommand, downCommand, gcCommand, indexCommand, initCommand,
-    listCommand, openCommand, refreshUpdateCacheCommand, resetCommand, syncCommand,
-    updateCommand, upCommand, proxyCommand
+    listCommand, openCommand, projectsCommand, refreshUpdateCacheCommand, resetCommand,
+    syncCommand, updateCommand, upCommand, proxyCommand
   ])
 )
 

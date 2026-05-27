@@ -202,11 +202,10 @@ export class ProxyService extends Effect.Service<ProxyService>()("ProxyService",
     const nextPort: () => Effect.Effect<number, FsError> =
       Effect.fn("ProxyService.nextPort")(function* () {
         const routes = yield* getRoutes()
-        let max = BASE_PORT
-        for (const route of routes) {
-          if (route.port > max) max = route.port
-        }
-        return max + 1
+        const used = new Set(routes.map((r) => r.port))
+        let port = BASE_PORT + 1
+        while (used.has(port)) port++
+        return port
       })
 
     const editCaddyfile: () => Effect.Effect<void, ShellExecError | FsError> =

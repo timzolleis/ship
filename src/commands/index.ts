@@ -65,7 +65,7 @@ export const indexCommand = Command.make(
       let totalIndexed = 0
       let totalSkipped = 0
       let totalCandidates = 0
-      let nextPortCursor: number | null = null
+      const usedPorts = new Set(existingRoutes.map((r) => r.port))
 
       yield* Console.log("")
 
@@ -124,11 +124,9 @@ export const indexCommand = Command.make(
           if (route) {
             port = route.port
           } else {
-            if (nextPortCursor === null) {
-              nextPortCursor = yield* proxy.nextPort()
-            }
-            port = nextPortCursor
-            nextPortCursor++
+            port = yield* proxy.nextPort()
+            while (usedPorts.has(port)) port++
+            usedPorts.add(port)
           }
 
           yield* Console.log("")

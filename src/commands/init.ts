@@ -2,6 +2,7 @@ import { Command, Options, Prompt } from "@effect/cli"
 import { FileSystem, Path } from "@effect/platform"
 import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
+import { ProxyService } from "../services/proxy.js"
 import {
   ProjectConfig,
   DatabaseConfig,
@@ -145,6 +146,7 @@ export const initCommand = Command.make(
   (opts) =>
     Effect.gen(function* () {
       const config = yield* ConfigService
+      const proxy = yield* ProxyService
       const pathSvc = yield* Path.Path
       const cwd = process.cwd()
 
@@ -214,9 +216,16 @@ export const initCommand = Command.make(
       const migrateCmd = yield* resolve(opts.migrateCmd, "Migrate command:", "pnpm db migrate:deploy")
       const devCmd = yield* resolve(opts.devCmd, "Dev command:", "pnpm dev -p {port}")
 
-      // 6. Build the config
+      // 6. Root checkout route — reuse domain/port if the project was registered before
+      const existing = (yield* config.loadConfig()).projects[alias]
+      const rootDomain = existing?.domain ?? `${alias}.localhost`
+      const rootPort = existing?.port ?? (yield* proxy.nextPort())
+
+      // 7. Build the config
       const project = new ProjectConfig({
         path: projectPath,
+        domain: rootDomain,
+        port: rootPort,
         database: new DatabaseConfig({
           container: dbContainer,
           user: dbUser,
@@ -236,15 +245,20 @@ export const initCommand = Command.make(
         }),
         worktree: new WorktreeConfig({
           dirPattern: `../${dirName}-{branch_slug}/`,
-          proxyDomainPattern: `${alias}-{branch_slug}.localhost`,
+          proxyDomainPattern: `{branch_slug}.${alias}.localhost`,
           dbNamePattern: `${alias}_{branch_slug_safe}`,
         }),
       })
 
       yield* config.addProject(alias, project)
 
+      yield* proxy.addRoute(rootDomain, rootPort).pipe(
+        Effect.catchTag("RouteExistsError", () => Effect.void)
+      )
+
       yield* Console.log("")
       yield* Console.log(`  ${green("✓")} Project ${bold(`"${alias}"`)} registered.`)
+      yield* Console.log(`  ${green("✓")} Root route     https://${bold(rootDomain)} → :${blue(String(rootPort))}`)
       yield* Console.log("")
     }).pipe(
       Effect.catchAll((e) =>

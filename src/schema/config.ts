@@ -67,6 +67,9 @@ export class WorktreeConfig extends Schema.Class<WorktreeConfig>("WorktreeConfig
 
 export class ProjectConfig extends Schema.Class<ProjectConfig>("ProjectConfig")({
   path: Schema.String,
+  /** Root checkout route: <domain> → localhost:<port>. Absent on projects registered before root routes existed — `ship up` backfills. */
+  domain: Schema.optional(Schema.String),
+  port: Schema.optional(Schema.Number),
   database: DatabaseConfig,
   commands: CommandsConfig,
   env: EnvConfig,

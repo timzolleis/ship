@@ -1,8 +1,40 @@
 import { Args, Command } from "@effect/cli"
-import { Console, Effect } from "effect"
+import { Console, Effect, Option } from "effect"
 import { ConfigService } from "../services/config.js"
 import { DatabaseService } from "../services/database.js"
+import { locateWorkspace } from "../domain/workspace-locate.js"
 import { bold, red } from "../fmt.js"
+
+// ---------------------------------------------------------------------------
+// Locate the current workspace (by cwd) and run SQL against its database.
+// ---------------------------------------------------------------------------
+
+export const runExec = (cwd: string, sql: string) =>
+  Effect.gen(function* () {
+    const config = yield* ConfigService
+    const db = yield* DatabaseService
+
+    const workspaces = yield* config.loadWorkspaces()
+    const located = locateWorkspace(workspaces, { cwd })
+
+    if (Option.isNone(located)) {
+      yield* Console.error(
+        `  ${red("✗")} Not inside a workspace. Navigate to a workspace directory first.`
+      )
+      return
+    }
+    const workspace = located.value
+
+    const projectConfig = yield* config.getProject(workspace.project)
+    const dbConfig = projectConfig.database
+
+    const output = yield* db.query(
+      { runtime: dbConfig.runtime, user: dbConfig.user },
+      workspace.dbName,
+      sql
+    )
+    yield* Console.log(output.trimEnd())
+  })
 
 // ---------------------------------------------------------------------------
 // ship db exec <sql>
@@ -10,33 +42,10 @@ import { bold, red } from "../fmt.js"
 
 const sqlArg = Args.text({ name: "sql" })
 
-const execCommand = Command.make(
-  "exec",
-  { sql: sqlArg },
-  ({ sql }) =>
-    Effect.gen(function* () {
-      const config = yield* ConfigService
-      const db = yield* DatabaseService
-
-      const workspaces = yield* config.loadWorkspaces()
-      const cwd = process.cwd()
-      const workspace = workspaces.find((w) => cwd.startsWith(w.path))
-
-      if (!workspace) {
-        yield* Console.error(`  ${red("✗")} Not inside a workspace. Navigate to a workspace directory first.`)
-        return
-      }
-
-      const projectConfig = yield* config.getProject(workspace.project)
-      const dbConfig = projectConfig.database
-
-      const output = yield* db.execSql(dbConfig.container, dbConfig.user, workspace.dbName, sql)
-      yield* Console.log(output.trimEnd())
-    }).pipe(
-      Effect.catchAll((e) =>
-        Console.error(`\n  ${red("Error:")} ${e.message}\n`)
-      )
-    )
+const execCommand = Command.make("exec", { sql: sqlArg }, ({ sql }) =>
+  runExec(process.cwd(), sql).pipe(
+    Effect.catchAll((e) => Console.error(`\n  ${red("Error:")} ${e.message}\n`))
+  )
 )
 
 // ---------------------------------------------------------------------------

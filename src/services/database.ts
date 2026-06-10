@@ -1,117 +1,156 @@
-import { Effect } from "effect";
-import type { ShellExecError } from "../errors.js";
-import { ShellService } from "./shell.js";
+import { Context, Effect, Layer, Ref } from "effect"
+import { DatabaseError } from "../errors.js"
+import type { ExecutionRuntime } from "../schema/config.js"
+import type { DbName } from "../schema/ids.js"
+import { CommandRunner } from "./runner.js"
 
 // ---------------------------------------------------------------------------
-// DatabaseService
+// DatabaseService — engine-agnostic interface over a CommandRunner. The
+// production adapter (layerPostgres) speaks postgres CLI tools; the runtime
+// (local | docker) is carried per-call as DatabaseTarget data (D1).
 // ---------------------------------------------------------------------------
 
-export class DatabaseService extends Effect.Service<DatabaseService>()(
-  "DatabaseService",
-  {
-    effect: Effect.gen(function* () {
-      const shell = yield* ShellService;
+export interface DatabaseTarget {
+  readonly runtime: ExecutionRuntime
+  readonly user: string
+}
 
-      const dockerExec = (container: string, args: ReadonlyArray<string>) =>
-        shell.exec("docker", ["exec", container, ...args]);
+export interface DatabaseShape {
+  readonly create: (t: DatabaseTarget, db: DbName) => Effect.Effect<void, DatabaseError>
+  readonly drop: (t: DatabaseTarget, db: DbName) => Effect.Effect<void, DatabaseError>
+  readonly clone: (
+    t: DatabaseTarget,
+    source: DbName,
+    db: DbName
+  ) => Effect.Effect<void, DatabaseError>
+  readonly exists: (t: DatabaseTarget, db: DbName) => Effect.Effect<boolean>
+  readonly ping: (t: DatabaseTarget) => Effect.Effect<boolean>
+  readonly query: (
+    t: DatabaseTarget,
+    db: DbName,
+    sql: string
+  ) => Effect.Effect<string, DatabaseError>
+  readonly session: (t: DatabaseTarget, db: DbName) => Effect.Effect<void, DatabaseError>
+}
 
-      const createDb: (
-        container: string,
-        user: string,
-        dbName: string,
-      ) => Effect.Effect<void, ShellExecError> = Effect.fn(
-        "DatabaseService.createDb",
-      )(function* (container, user, dbName) {
-        yield* dockerExec(container, ["createdb", "-U", user, dbName]);
-      });
+const dbError = (op: string, database: string) => (detail: string) =>
+  new DatabaseError({ op, database, detail })
 
-      const dropDb: (
-        container: string,
-        user: string,
-        dbName: string,
-      ) => Effect.Effect<void, ShellExecError> = Effect.fn(
-        "DatabaseService.dropDb",
-      )(function* (container, user, dbName) {
-        yield* dockerExec(container, [
-          "dropdb",
-          "--if-exists",
-          "-U",
-          user,
-          dbName,
-        ]);
-      });
+export class DatabaseService extends Context.Tag("ship/DatabaseService")<
+  DatabaseService,
+  DatabaseShape
+>() {
+  static layerPostgres: Layer.Layer<DatabaseService, never, CommandRunner> = Layer.effect(
+    DatabaseService,
+    Effect.gen(function* () {
+      const runner = yield* CommandRunner
 
-      const cloneDb: (
-        container: string,
-        user: string,
-        sourceDb: string,
-        targetDb: string,
-      ) => Effect.Effect<void, ShellExecError> = Effect.fn(
-        "DatabaseService.cloneDb",
-      )(function* (container, user, sourceDb, targetDb) {
-        yield* dockerExec(container, ["createdb", "-U", user, targetDb]);
-        yield* shell.exec("docker", [
-          "exec",
-          container,
-          "bash",
-          "-c",
-          `pg_dump -U ${user} ${sourceDb} | psql -U ${user} ${targetDb}`,
-        ]);
-      });
+      const create: DatabaseShape["create"] = (t, db) =>
+        runner
+          .run(t.runtime, "createdb", ["-U", t.user, db])
+          .pipe(
+            Effect.asVoid,
+            Effect.mapError((e) => dbError("create", db)(e.message))
+          )
 
-      const dbExists: (
-        container: string,
-        user: string,
-        dbName: string,
-      ) => Effect.Effect<boolean, ShellExecError> = Effect.fn(
-        "DatabaseService.dbExists",
-      )(function* (container, user, dbName) {
-        return yield* dockerExec(container, ["psql", "-U", user, "-lqt"]).pipe(
-          Effect.map((r) =>
-            r.stdout.split("\n").some((line) => line.trim().startsWith(dbName)),
+      const drop: DatabaseShape["drop"] = (t, db) =>
+        runner
+          .run(t.runtime, "dropdb", ["--if-exists", "-U", t.user, db])
+          .pipe(
+            Effect.asVoid,
+            Effect.mapError((e) => dbError("drop", db)(e.message))
+          )
+
+      const clone: DatabaseShape["clone"] = (t, source, db) =>
+        runner.run(t.runtime, "createdb", ["-U", t.user, db]).pipe(
+          Effect.zipRight(
+            runner.runScript(
+              t.runtime,
+              `pg_dump -U ${t.user} ${source} | psql -U ${t.user} ${db}`
+            )
           ),
-          Effect.catchAll(() => Effect.succeed(false)),
-        );
-      });
+          Effect.asVoid,
+          Effect.mapError((e) => dbError("clone", db)(e.message))
+        )
 
-      const isContainerRunning: (container: string) => Effect.Effect<boolean> =
-        Effect.fn("DatabaseService.isContainerRunning")(function* (container) {
-          return yield* shell
-            .exec("docker", ["exec", container, "pg_isready", "-q"])
-            .pipe(
-              Effect.map(() => true),
-              Effect.catchAll(() => Effect.succeed(false)),
-            );
-        });
+      const exists: DatabaseShape["exists"] = (t, db) =>
+        runner.run(t.runtime, "psql", ["-U", t.user, "-lqt"]).pipe(
+          Effect.map((r) =>
+            r.stdout.split("\n").some((line) => line.trim().startsWith(db))
+          ),
+          Effect.catchAll(() => Effect.succeed(false))
+        )
 
-      const execSql: (
-        container: string,
-        user: string,
-        dbName: string,
-        sql: string,
-      ) => Effect.Effect<string, ShellExecError> = Effect.fn(
-        "DatabaseService.execSql",
-      )(function* (container, user, dbName, sql) {
-        const result = yield* dockerExec(container, [
-          "psql",
-          "-U",
-          user,
-          dbName,
-          "-c",
-          sql,
-        ]);
-        return result.stdout;
-      });
+      const ping: DatabaseShape["ping"] = (t) =>
+        runner.run(t.runtime, "pg_isready", ["-q"]).pipe(
+          Effect.as(true),
+          Effect.catchAll(() => Effect.succeed(false))
+        )
 
-      return {
-        createDb,
-        dropDb,
-        cloneDb,
-        dbExists,
-        isContainerRunning,
-        execSql,
-      };
-    }),
-    dependencies: [ShellService.Default],
-  },
-) {}
+      const query: DatabaseShape["query"] = (t, db, sql) =>
+        runner
+          .run(t.runtime, "psql", ["-U", t.user, db, "-c", sql])
+          .pipe(
+            Effect.map((r) => r.stdout),
+            Effect.mapError((e) => dbError("query", db)(e.message))
+          )
+
+      const session: DatabaseShape["session"] = (t, db) =>
+        runner
+          .runInteractive(t.runtime, "psql", ["-U", t.user, db])
+          .pipe(Effect.mapError((e) => dbError("session", db)(e.message)))
+
+      return { create, drop, clone, exists, ping, query, session }
+    })
+  )
+
+  static layer: Layer.Layer<DatabaseService, never, CommandRunner> = DatabaseService.layerPostgres
+
+  static layerMemory: (
+    initial?: ReadonlyArray<DbName>,
+    opts?: { reachable?: boolean }
+  ) => Layer.Layer<DatabaseService> = (initial, opts) =>
+    Layer.effect(
+      DatabaseService,
+      Effect.gen(function* () {
+        const set = yield* Ref.make(new Set<string>(initial ?? []))
+        const reachable = opts?.reachable ?? true
+
+        const create: DatabaseShape["create"] = (_t, db) =>
+          Ref.get(set).pipe(
+            Effect.flatMap((s) =>
+              s.has(db)
+                ? Effect.fail(dbError("create", db)("already exists"))
+                : Ref.update(set, (cur) => new Set([...cur, db as string]))
+            )
+          )
+
+        const drop: DatabaseShape["drop"] = (_t, db) =>
+          Ref.update(set, (s) => {
+            const next = new Set(s)
+            next.delete(db)
+            return next
+          })
+
+        const clone: DatabaseShape["clone"] = (_t, source, db) =>
+          Ref.get(set).pipe(
+            Effect.flatMap((s) =>
+              s.has(source)
+                ? Ref.update(set, (cur) => new Set([...cur, db as string]))
+                : Effect.fail(dbError("clone", db)(`source '${source}' does not exist`))
+            )
+          )
+
+        const exists: DatabaseShape["exists"] = (_t, db) =>
+          Ref.get(set).pipe(Effect.map((s) => s.has(db)))
+
+        const ping: DatabaseShape["ping"] = () => Effect.succeed(reachable)
+
+        const query: DatabaseShape["query"] = () => Effect.succeed("")
+
+        const session: DatabaseShape["session"] = () => Effect.void
+
+        return { create, drop, clone, exists, ping, query, session }
+      })
+    )
+}

@@ -1,5 +1,5 @@
 import { FileSystem, Path } from "@effect/platform"
-import { Effect, Option, Schema } from "effect"
+import { Context, Effect, Layer, Option, Schema } from "effect"
 import { spawn } from "node:child_process"
 import { chmod, realpath } from "node:fs/promises"
 import { ConfigService } from "./config.js"
@@ -25,8 +25,27 @@ const UpdateCacheJson = Schema.parseJson(UpdateCache, { space: 2 })
 
 const assetName = (platform: string, arch: string) => `ship-${platform}-${arch}`
 
-export class UpdaterService extends Effect.Service<UpdaterService>()("UpdaterService", {
-  effect: Effect.gen(function* () {
+export interface UpdaterShape {
+  readCache(): Effect.Effect<Option.Option<UpdateCache>>
+  writeCache(cache: UpdateCache): Effect.Effect<void, WriteFileError | EncodeConfigError>
+  isCacheStale(cache: UpdateCache): boolean
+  fetchLatestVersion(): Effect.Effect<string, UpdateCheckError>
+  refreshCache(): Effect.Effect<void, UpdateCheckError | WriteFileError | EncodeConfigError>
+  notifyIfAvailable(): Effect.Effect<void>
+  spawnBackgroundRefreshIfStale(): Effect.Effect<void>
+  installLatest(
+    version: string
+  ): Effect.Effect<void, UpdateDownloadError | UpdateInstallError | UnsupportedPlatformError>
+}
+
+export class UpdaterService extends Context.Tag("ship/UpdaterService")<UpdaterService, UpdaterShape>() {
+  static layer: Layer.Layer<
+    UpdaterService,
+    never,
+    ConfigService | ShellService | FileSystem.FileSystem | Path.Path
+  > = Layer.effect(
+    UpdaterService,
+    Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
     const pathSvc = yield* Path.Path
     const config = yield* ConfigService
@@ -182,16 +201,16 @@ export class UpdaterService extends Effect.Service<UpdaterService>()("UpdaterSer
         })).pipe(Effect.ignore)
       })
 
-    return {
-      readCache,
-      writeCache,
-      isCacheStale,
-      fetchLatestVersion,
-      refreshCache,
-      notifyIfAvailable,
-      spawnBackgroundRefreshIfStale,
-      installLatest
-    }
-  }),
-  dependencies: [ConfigService.Default, ShellService.Default]
-}) {}
+      return {
+        readCache,
+        writeCache,
+        isCacheStale,
+        fetchLatestVersion,
+        refreshCache,
+        notifyIfAvailable,
+        spawnBackgroundRefreshIfStale,
+        installLatest
+      }
+    })
+  )
+}

@@ -1,12 +1,14 @@
-import { Effect } from "effect"
+import { Context, Effect, Layer } from "effect"
 import type { ShellExecError } from "../errors.js"
 import type { ProjectConfig } from "../schema/config.js"
+import { DatabaseService } from "./database.js"
 import { GitService } from "./git.js"
 import { ShellService } from "./shell.js"
-import { DatabaseService } from "./database.js"
 
 // ---------------------------------------------------------------------------
-// SyncService
+// SyncService — Tier 3 orchestrator (D7: real `layer` only, no layerMemory).
+// Fast-forwards the project's base checkout, then (only when HEAD moved) runs
+// install/generate and — when the database is reachable (ping) — migrate.
 // ---------------------------------------------------------------------------
 
 export interface SyncResult {
@@ -18,96 +20,127 @@ export interface SyncResult {
   readonly skippedPull?: string
 }
 
-export class SyncService extends Effect.Service<SyncService>()("SyncService", {
-  effect: Effect.gen(function* () {
-    const git = yield* GitService
-    const shell = yield* ShellService
-    const db = yield* DatabaseService
+export interface SyncShape {
+  readonly sync: (
+    config: ProjectConfig,
+    base?: string
+  ) => Effect.Effect<SyncResult, ShellExecError>
+}
 
-    const sync: (config: ProjectConfig, baseBranch?: string) => Effect.Effect<SyncResult, ShellExecError> =
-      Effect.fn("SyncService.sync")(function* (config, baseBranch) {
-        const repoPath = config.path
+export class SyncService extends Context.Tag("ship/SyncService")<
+  SyncService,
+  SyncShape
+>() {
+  static layer: Layer.Layer<
+    SyncService,
+    never,
+    GitService | ShellService | DatabaseService
+  > = Layer.effect(
+    SyncService,
+    Effect.gen(function* () {
+      const git = yield* GitService
+      const shell = yield* ShellService
+      const db = yield* DatabaseService
 
-        // 1. Fetch origin
-        yield* git.fetch(repoPath)
+      const sync: SyncShape["sync"] = Effect.fn("SyncService.sync")(
+        function* (config, baseBranch) {
+          const repoPath = config.path
 
-        // 2a. Custom base: update that branch ref directly (no checkout needed)
-        if (baseBranch) {
-          const before = yield* git.revParse(repoPath, baseBranch).pipe(
-            Effect.map((r) => r),
-            Effect.catchTag("ShellExecError", () => Effect.succeed(""))
-          )
-          const updateOk = yield* git.updateBranch(repoPath, baseBranch).pipe(
+          // 1. Fetch origin.
+          yield* git.fetch(repoPath)
+
+          // 2a. Custom base: fast-forward that branch ref directly (no checkout).
+          if (baseBranch) {
+            const before = yield* git.revParse(repoPath, baseBranch).pipe(
+              Effect.catchTag("ShellExecError", () => Effect.succeed(""))
+            )
+            const updateOk = yield* git.updateBranch(repoPath, baseBranch).pipe(
+              Effect.as(true),
+              Effect.catchTag("ShellExecError", () => Effect.succeed(false))
+            )
+            if (!updateOk) {
+              return {
+                fetched: true,
+                pulled: false,
+                headMoved: false,
+                installed: false,
+                migrated: false,
+                skippedPull: `could not fast-forward ${baseBranch}`,
+              }
+            }
+            const after = yield* git.revParse(repoPath, baseBranch).pipe(
+              Effect.catchTag("ShellExecError", () => Effect.succeed(""))
+            )
+            return {
+              fetched: true,
+              pulled: true,
+              headMoved: before !== after,
+              installed: false,
+              migrated: false,
+            }
+          }
+
+          // 2b. Default: fast-forward main (skip if dirty or non-ff).
+          const dirty = yield* git.isDirty(repoPath)
+          if (dirty) {
+            return {
+              fetched: true,
+              pulled: false,
+              headMoved: false,
+              installed: false,
+              migrated: false,
+              skippedPull: "working tree has uncommitted changes",
+            }
+          }
+
+          const before = yield* git.revParseHead(repoPath)
+          const pullOk = yield* git.pullFfOnly(repoPath).pipe(
             Effect.as(true),
             Effect.catchTag("ShellExecError", () => Effect.succeed(false))
           )
-          if (!updateOk) {
+          if (!pullOk) {
             return {
-              fetched: true, pulled: false, headMoved: false,
-              installed: false, migrated: false,
-              skippedPull: `could not fast-forward ${baseBranch}`
+              fetched: true,
+              pulled: false,
+              headMoved: false,
+              installed: false,
+              migrated: false,
+              skippedPull: "cannot fast-forward (main has diverged)",
             }
           }
-          const after = yield* git.revParse(repoPath, baseBranch).pipe(
-            Effect.catchTag("ShellExecError", () => Effect.succeed(""))
-          )
-          return {
-            fetched: true, pulled: true, headMoved: before !== after,
-            installed: false, migrated: false
-          }
-        }
 
-        // 2b. Default: fast-forward main (skip if dirty or non-ff)
-        const dirty = yield* git.isDirty(repoPath)
-        if (dirty) {
-          return {
-            fetched: true, pulled: false, headMoved: false,
-            installed: false, migrated: false,
-            skippedPull: "working tree has uncommitted changes"
-          }
-        }
+          const after = yield* git.revParseHead(repoPath)
+          const headMoved = before !== after
 
-        const before = yield* git.revParseHead(repoPath)
-        const pullOk = yield* git.pullFfOnly(repoPath).pipe(
-          Effect.as(true),
-          Effect.catchTag("ShellExecError", () => Effect.succeed(false))
-        )
-        if (!pullOk) {
-          return {
-            fetched: true, pulled: false, headMoved: false,
-            installed: false, migrated: false,
-            skippedPull: "cannot fast-forward (main has diverged)"
-          }
-        }
+          // 3. Only install/generate/migrate when HEAD moved.
+          let installed = false
+          let migrated = false
 
-        const after = yield* git.revParseHead(repoPath)
-        const headMoved = before !== after
-
-        // 3. Only install/generate/migrate if HEAD moved
-        let installed = false
-        let migrated = false
-
-        if (headMoved) {
-          if (config.commands.install) {
-            yield* shell.execInDir(repoPath, config.commands.install)
-            installed = true
-          }
-          if (config.commands.generate) {
-            yield* shell.execInDir(repoPath, config.commands.generate)
-          }
-          if (config.commands.migrate) {
-            const running = yield* db.isContainerRunning(config.database.container)
-            if (running) {
-              yield* shell.execInDir(repoPath, config.commands.migrate)
-              migrated = true
+          if (headMoved) {
+            if (config.commands.install) {
+              yield* shell.execInDir(repoPath, config.commands.install)
+              installed = true
+            }
+            if (config.commands.generate) {
+              yield* shell.execInDir(repoPath, config.commands.generate)
+            }
+            if (config.commands.migrate) {
+              const running = yield* db.ping({
+                runtime: config.database.runtime,
+                user: config.database.user,
+              })
+              if (running) {
+                yield* shell.execInDir(repoPath, config.commands.migrate)
+                migrated = true
+              }
             }
           }
+
+          return { fetched: true, pulled: true, headMoved, installed, migrated }
         }
+      )
 
-        return { fetched: true, pulled: true, headMoved, installed, migrated }
-      })
-
-    return { sync }
-  }),
-  dependencies: [GitService.Default, ShellService.Default, DatabaseService.Default]
-}) {}
+      return { sync }
+    })
+  )
+}

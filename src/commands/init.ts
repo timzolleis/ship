@@ -10,7 +10,16 @@ import {
   EnvConfig,
   EnvVarConfig,
   WorktreeConfig,
+  dockerContainerOf,
 } from "../schema/config.js"
+import {
+  ContainerName,
+  DbName,
+  HostPort,
+  ProjectAlias,
+  ProxyDomain,
+  RepoPath,
+} from "../schema/ids.js"
 import { bold, dim, green, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -162,7 +171,9 @@ export const initCommand = Command.make(
       const aliasForCwd = Object.entries(shipConfig.projects).find(([, p]) => p.path === cwd)?.[0]
 
       // 1. Project alias
-      const alias = yield* resolve(opts.alias, "Project alias:", aliasForCwd ?? dirName.substring(0, 3))
+      const alias = ProjectAlias.make(
+        yield* resolve(opts.alias, "Project alias:", aliasForCwd ?? dirName.substring(0, 3))
+      )
 
       // Re-running init on a known alias updates it — prompts default to stored values
       const existing = shipConfig.projects[alias]
@@ -217,7 +228,7 @@ export const initCommand = Command.make(
       }
 
       // 4. Database config (confirm or override)
-      const dbContainer = yield* resolve(opts.dbContainer, "Database container name:", existing?.database.container ?? "postgres")
+      const dbContainer = yield* resolve(opts.dbContainer, "Database container name:", (existing ? dockerContainerOf(existing.database) : "") || "postgres")
       const dbUser = yield* resolve(opts.dbUser, "Database user:", inferredDbUser)
       const dbSource = yield* resolve(opts.dbSource, "Source database to clone from:", inferredDbSource)
 
@@ -228,19 +239,22 @@ export const initCommand = Command.make(
       const devCmd = yield* resolve(opts.devCmd, "Dev command:", existing?.commands.dev ?? "pnpm dev -p {port}")
 
       // 6. Root checkout route — reuse domain/port if the project was registered before
-      const rootDomain = existing?.domain ?? `${alias}.localhost`
-      const rootPort = existing?.port ?? (yield* proxy.nextPort())
+      const rootDomain = existing?.domain ?? ProxyDomain.make(`${alias}.localhost`)
+      // nextPort() returns a plain number until Slice 4 brands it; brand at the edge.
+      const rootPort = existing?.port ?? HostPort.make(yield* proxy.nextPort())
 
       // 7. Build the config — merge env with existing (manual tweaks like dev_url
       // paths win over fresh detection), keep customized worktree patterns
       const project = new ProjectConfig({
-        path: projectPath,
-        domain: rootDomain,
+        // Brands constructed at the edge (prompt strings → branded scalars).
+        path: RepoPath.make(projectPath),
+        domain: ProxyDomain.make(rootDomain),
         port: rootPort,
         database: new DatabaseConfig({
-          container: dbContainer,
+          // Docker assumed where `container` was stored before (behavior-preserving).
+          runtime: { _tag: "docker", container: ContainerName.make(dbContainer) },
           user: dbUser,
-          source: dbSource,
+          source: DbName.make(dbSource),
           host: inferredDbHost,
           port: inferredDbPort,
         }),

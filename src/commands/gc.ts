@@ -1,13 +1,17 @@
 import { Command, Options, Prompt } from "@effect/cli"
-import { Console, Effect } from "effect"
+import { Console, Effect, Stream } from "effect"
 import { ConfigService } from "../services/config.js"
 import type { ProjectConfig } from "../schema/config.js"
-import { ProxyService } from "../services/proxy.js"
+import type {
+  CreateDirectoryError,
+  EncodeConfigError,
+  ParseConfigError,
+  ReadFileError,
+  WriteFileError,
+} from "../errors.js"
 import { ShellService } from "../services/shell.js"
-import { GitService } from "../services/git.js"
-import { DatabaseService } from "../services/database.js"
 import { SyncService } from "../services/sync.js"
-import { ClaudeService } from "../services/claude.js"
+import { WorkspaceService } from "../services/workspace.js"
 import { bold, dim, green, red, yellow, blue } from "../fmt.js"
 import type { Workspace } from "../schema/workspace.js"
 
@@ -18,6 +22,13 @@ import type { Workspace } from "../schema/workspace.js"
 const forceOpt = Options.boolean("force").pipe(Options.withAlias("f"))
 const dryRunOpt = Options.boolean("dry-run")
 const syncOpt = Options.boolean("sync").pipe(Options.withAlias("s"))
+
+type ConfigError =
+  | ParseConfigError
+  | ReadFileError
+  | CreateDirectoryError
+  | EncodeConfigError
+  | WriteFileError
 
 interface PrStatus {
   state: "MERGED" | "OPEN" | "CLOSED"
@@ -32,18 +43,49 @@ interface CheckedWorkspace {
   prLabel: string
 }
 
+// Tear down each cleaned workspace (worktree + branch + remote branch, forced),
+// then write the workspace registry exactly once to avoid read-modify-write
+// races. Returns the number of workspaces removed from the registry.
+export const gcCleanup = (
+  toClean: ReadonlyArray<{ ws: Workspace; projectConfig: ProjectConfig | null }>
+): Effect.Effect<number, ConfigError, WorkspaceService | ConfigService> =>
+  Effect.gen(function* () {
+    const wsSvc = yield* WorkspaceService
+    const config = yield* ConfigService
+
+    yield* Effect.forEach(
+      toClean,
+      ({ ws, projectConfig }) =>
+        projectConfig
+          ? wsSvc
+              .teardown(ws, projectConfig, {
+                removeWorktree: true,
+                force: true,
+                deleteRemoteBranch: true,
+              })
+              .pipe(Stream.runDrain)
+          : Effect.void,
+      { concurrency: "unbounded" }
+    )
+
+    if (toClean.length === 0) return 0
+
+    const removed = new Set(toClean.map((c) => `${c.ws.project}\0${c.ws.branch}`))
+    const current = yield* config.loadWorkspaces()
+    yield* config.saveWorkspaces(
+      current.filter((w) => !removed.has(`${w.project}\0${w.branch}`))
+    )
+    return toClean.length
+  })
+
 export const gcCommand = Command.make(
   "gc",
   { force: forceOpt, dryRun: dryRunOpt, sync: syncOpt },
   ({ force, dryRun, sync: shouldSync }) =>
     Effect.gen(function* () {
       const config = yield* ConfigService
-      const proxy = yield* ProxyService
       const shell = yield* ShellService
-      const git = yield* GitService
-      const db = yield* DatabaseService
       const syncSvc = yield* SyncService
-      const claude = yield* ClaudeService
 
       const workspaces = yield* config.loadWorkspaces()
 
@@ -55,7 +97,7 @@ export const gcCommand = Command.make(
       yield* Console.log("")
       yield* Console.log(`  Checking ${workspaces.length} workspace${workspaces.length === 1 ? "" : "s"}...`)
 
-      // Phase 1: Check all PR statuses in parallel
+      // Phase 1: Check all PR statuses in parallel (gh pr view stays inline — D12).
       const checked: CheckedWorkspace[] = yield* Effect.all(
         workspaces.map((ws) =>
           Effect.gen(function* () {
@@ -127,31 +169,13 @@ export const gcCommand = Command.make(
               )
             )
 
-        const teardown = ({ ws, projectConfig, prLabel }: CheckedWorkspace) =>
-          Effect.gen(function* () {
-            yield* Effect.ignore(proxy.removeRoute(ws.proxyDomain))
-            if (projectConfig) {
-              yield* Effect.ignore(db.dropDb(projectConfig.database.container, projectConfig.database.user, ws.dbName))
-              yield* Effect.ignore(git.worktreeRemove(projectConfig.path, ws.path, true))
-              yield* Effect.ignore(git.deleteBranch(projectConfig.path, ws.branch))
-              yield* git.deleteRemoteBranch(projectConfig.path, ws.branch).pipe(
-                Effect.catchAll(() => Console.log(`  ${dim("ℹ")} Remote branch ${dim(ws.branch)} already deleted or not found`))
-              )
-            }
-            yield* claude.removeProjectConvo(ws.path)
-            yield* Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${green("cleaned up")}`)
-          })
+        cleaned = yield* gcCleanup(
+          toClean.map((c) => ({ ws: c.ws, projectConfig: c.projectConfig }))
+        )
 
-        yield* Effect.forEach(toClean, teardown, { concurrency: "unbounded" })
-
-        // Batch a single workspaces.json write to avoid read-modify-write races.
-        if (toClean.length > 0) {
-          const removed = new Set(toClean.map((c) => `${c.ws.project}\0${c.ws.branch}`))
-          const current = yield* config.loadWorkspaces()
-          yield* config.saveWorkspaces(current.filter((w) => !removed.has(`${w.project}\0${w.branch}`)))
-        }
-
-        cleaned = toClean.length
+        yield* Effect.forEach(toClean, ({ ws, prLabel }) =>
+          Console.log(`  ${ws.project}  ${bold(ws.branch.padEnd(22))} ${prLabel}  → ${green("cleaned up")}`)
+        )
       }
 
       yield* Console.log("")

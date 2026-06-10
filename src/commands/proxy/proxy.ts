@@ -1,9 +1,10 @@
 import { Args, Command } from "@effect/cli"
 import { Console, Effect } from "effect"
-import { ProxyService, type ProxyError } from "../../services/proxy.js"
+import { ProxyService } from "../../services/proxy.js"
+import { ProxyDomain, HostPort } from "../../schema/ids.js"
 import { bold, dim, green, red, blue, yellow } from "../../fmt.js"
 
-const errorMessage = (e: ProxyError): string => e.message
+const errorMessage = (e: { readonly message: string }): string => e.message
 
 // ---------------------------------------------------------------------------
 // ship proxy (root)
@@ -100,7 +101,7 @@ const addPort = Args.integer({ name: "port" })
 const proxyAdd = Command.make("add", { domain: addDomain, port: addPort }, ({ domain, port }) =>
   Effect.gen(function* () {
     const proxy = yield* ProxyService
-    yield* proxy.addRoute(domain, port)
+    yield* proxy.addRoute(ProxyDomain.make(domain), HostPort.make(port))
     yield* Console.log(`  ${green("✓")} ${bold(domain)} ${dim("→")} localhost:${blue(String(port))}`)
   }).pipe(
     Effect.catchAll((e) => Console.log(`  ${red("✗")} ${errorMessage(e)}`))

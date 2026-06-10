@@ -1,16 +1,17 @@
 import { Schema } from "effect"
+import { BranchName, DbName, HostPort, ProjectAlias, ProxyDomain, WorktreePath } from "./ids.js"
 
 // ---------------------------------------------------------------------------
 // Workspace entry — one per active worktree
 // ---------------------------------------------------------------------------
 
 export class Workspace extends Schema.Class<Workspace>("Workspace")({
-  project: Schema.String,
-  branch: Schema.String,
-  path: Schema.String,
-  port: Schema.Number,
-  dbName: Schema.String,
-  proxyDomain: Schema.String,
+  project: ProjectAlias,
+  branch: BranchName,
+  path: WorktreePath,
+  port: HostPort,
+  dbName: DbName,
+  proxyDomain: ProxyDomain,
   created: Schema.String
 }) {}
 

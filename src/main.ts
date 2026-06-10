@@ -17,6 +17,7 @@ import { updateCommand } from "./commands/update.js"
 import { upCommand } from "./commands/up.js"
 import { proxyCommand } from "./commands/proxy/proxy.js"
 import { ShellService } from "./services/shell.js"
+import { CommandRunner } from "./services/runner.js"
 import { GitService } from "./services/git.js"
 import { DatabaseService } from "./services/database.js"
 import { ConfigService } from "./services/config.js"
@@ -26,6 +27,7 @@ import { EnvService } from "./services/env.js"
 import { SyncService } from "./services/sync.js"
 import { ClaudeService } from "./services/claude.js"
 import { UpdaterService } from "./services/updater.js"
+import { WorkspaceService } from "./services/workspace.js"
 import { VERSION } from "./version.js"
 import { bold, dim, blue } from "./fmt.js"
 
@@ -113,19 +115,32 @@ const LogLevelLive = Logger.minimumLogLevel(
   process.env.SHIP_DEBUG ? LogLevel.Debug : LogLevel.Info
 )
 
+// mergeAll does not cross-wire siblings, so each tier is provideMerge'd into the
+// next — keeping the spec's single-MainLayer intent while resolving requirements.
+//
+// Tier 1 — execution seams (the only OS edge): ShellService → CommandRunner.
+const ExecutionLayer = CommandRunner.layer.pipe(
+  Layer.provideMerge(ShellService.layer)
+)
+
+// Tier 2 — resource seams over the execution seams + NodeContext FS/Path.
+const ResourceSeams = Layer.mergeAll(
+  DatabaseService.layer, GitService.layer, ProxyService.layer, EnvService.layer,
+  ConfigService.layer, ClaudeService.layer
+).pipe(Layer.provideMerge(ExecutionLayer))
+
+// SyncService (orchestrator over Git/Shell/Database) is wired over the resource
+// seams so the deeper WorkspaceService orchestrator can depend on it as one seam.
+const ResourceLayer = SyncService.layer.pipe(Layer.provideMerge(ResourceSeams))
+
+// Tier 3 — orchestrators + presentation seams over the resource seams.
 const MainLayer = Layer.mergeAll(
-  ShellService.Default,
-  GitService.Default,
-  DatabaseService.Default,
-  ConfigService.Default,
-  ProxyService.Default,
-  EditorService.Default,
-  EnvService.Default,
-  SyncService.Default,
-  ClaudeService.Default,
-  UpdaterService.Default,
+  WorkspaceService.layer, EditorService.layer, UpdaterService.layer,
   LogLevelLive
-).pipe(Layer.provideMerge(NodeContext.layer))
+).pipe(
+  Layer.provideMerge(ResourceLayer),
+  Layer.provideMerge(NodeContext.layer)
+)
 
 // ---------------------------------------------------------------------------
 // Run

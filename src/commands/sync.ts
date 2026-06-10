@@ -1,7 +1,8 @@
 import { Args, Command } from "@effect/cli"
-import { Console, Effect } from "effect"
+import { Console, Effect, Schema } from "effect"
 import { ConfigService } from "../services/config.js"
 import { SyncService } from "../services/sync.js"
+import { ProjectAlias } from "../schema/ids.js"
 import { bold, dim, green, yellow, red } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -13,11 +14,12 @@ const projectArg = Args.text({ name: "project" })
 export const syncCommand = Command.make(
   "sync",
   { project: projectArg },
-  ({ project }) =>
+  ({ project: projectInput }) =>
     Effect.gen(function* () {
       const config = yield* ConfigService
       const sync = yield* SyncService
 
+      const project = Schema.decodeSync(ProjectAlias)(projectInput)
       const projectConfig = yield* config.getProject(project)
 
       yield* Console.log("")

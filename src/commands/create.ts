@@ -1,36 +1,31 @@
 import { Args, Command, Options, Prompt } from "@effect/cli"
 import { Path } from "@effect/platform"
-import { Console, Effect, Option } from "effect"
-import { ConfigService } from "../services/config.js"
-import { ProxyService } from "../services/proxy.js"
-import { GitService } from "../services/git.js"
-import { DatabaseService } from "../services/database.js"
-import { ShellService } from "../services/shell.js"
-import { EditorService } from "../services/editor.js"
-import { SyncService } from "../services/sync.js"
+import { Console, Effect, Option, Schema, Stream } from "effect"
+import { deriveNames } from "../domain/workspace-name.js"
+import { bold, blue, dim, green, red, yellow } from "../fmt.js"
 import { ShipConfig } from "../schema/config.js"
-import { Workspace } from "../schema/workspace.js"
-import { EnvService } from "../services/env.js"
-import { bold, dim, green, yellow, red, blue } from "../fmt.js"
+import { BranchName, type DbName, ProjectAlias, type ProxyDomain, type HostPort, WorktreePath } from "../schema/ids.js"
+import { ConfigService } from "../services/config.js"
+import { EditorService } from "../services/editor.js"
+import type { PatchResult } from "../services/env.js"
+import type { ProvisionEvent } from "../services/workspace.js"
+import { WorkspaceService } from "../services/workspace.js"
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Pure rendering — turns a ProvisionEvent (and env changes) into console lines.
 // ---------------------------------------------------------------------------
 
-const toBranchSlug = (branch: string) => branch.replace(/\//g, "-")
-
-const toBranchSlugSafe = (branch: string) =>
-  branch.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()
-
-const resolvePattern = (pattern: string, vars: Record<string, string>): string => {
-  let result = pattern
-  for (const [key, value] of Object.entries(vars)) {
-    result = result.replace(new RegExp(`\\{${key}\\}`, "g"), value)
-  }
-  return result
+export interface RenderContext {
+  readonly branch: BranchName
+  readonly worktreeDir: WorktreePath
+  readonly dbName: DbName
+  readonly source: DbName
+  readonly proxyDomain: ProxyDomain
+  readonly port: HostPort
 }
 
-const abbreviateValue = (value: string): string => {
+/** Shorten a URL/db value for the env-change diff column. */
+export const abbreviateValue = (value: string): string => {
   try {
     const url = new URL(value)
     return url.hostname + (url.pathname !== "/" ? url.pathname : "")
@@ -40,6 +35,70 @@ const abbreviateValue = (value: string): string => {
     return value.length > 40 ? value.substring(0, 37) + "..." : value
   }
 }
+
+const okLine = (label: string, detail: string) => `  ${green("✓")} ${label.padEnd(14)} ${detail}`
+const skipLine = (label: string, detail: string) =>
+  `  ${dim("•")} ${label.padEnd(14)} ${detail} ${dim("(already present)")}`
+const warnLine = (label: string, detail: string) => `  ${yellow("⚠")} ${label.padEnd(14)} ${dim(detail)}`
+
+/** Map a single provision event to zero or more console lines. */
+export const renderEvent = (event: ProvisionEvent, ctx: RenderContext): ReadonlyArray<string> => {
+  if (event._tag === "completed") return []
+  const { step, status, detail } = event
+  switch (step) {
+    case "probe":
+      return [`  ${yellow("↻")} Resuming partial setup...`]
+    case "sync-base": {
+      if (status === "warning") return [warnLine("Base sync", detail ?? "")]
+      if (status !== "done" || !detail) return []
+      if (detail === "already up to date")
+        return [dim("  · Base           already up to date")]
+      // detail = "<label> fast-forwarded" optionally "; migrated <source>"
+      const [updated, migrated] = detail.split("; migrated ")
+      const lines = [okLine("Base updated", updated!)]
+      if (migrated) lines.push(okLine("Base migrated", migrated))
+      return lines
+    }
+    case "worktree":
+      return status === "skipped-existing"
+        ? [skipLine("Branch", ctx.branch), skipLine("Worktree", dim(ctx.worktreeDir))]
+        : [okLine("Branch", bold(ctx.branch)), okLine("Worktree", dim(ctx.worktreeDir))]
+    case "database":
+      return status === "skipped-existing"
+        ? [skipLine("Database", bold(ctx.dbName))]
+        : [okLine("Database", `${bold(ctx.dbName)} ${dim(`(cloned from ${ctx.source})`)}`)]
+    case "install":
+      return [okLine("Dependencies", "installed")]
+    case "migrate":
+      return [okLine("Migrations", "applied")]
+    case "proxy-route": {
+      const route = `https://${bold(ctx.proxyDomain)} → :${blue(String(ctx.port))}`
+      if (status === "warning") return [warnLine("Proxy", detail ?? "")]
+      return status === "skipped-existing"
+        ? [`  ${dim("•")} ${"Proxy".padEnd(14)} ${route} ${dim("(already present)")}`]
+        : [`  ${green("✓")} ${"Proxy".padEnd(14)} ${route}`]
+    }
+    default:
+      return []
+  }
+}
+
+/** Render the env-change diff block from the completed result. */
+export const renderEnvChanges = (results: ReadonlyArray<PatchResult>): ReadonlyArray<string> => {
+  const lines: string[] = []
+  for (const result of results) {
+    if (result.changes.length === 0) continue
+    lines.push(`    ${blue(result.file)}:`)
+    for (const change of result.changes) {
+      lines.push(
+        `      ${dim(change.key.padEnd(25))} ${abbreviateValue(change.from)} → ${abbreviateValue(change.to)}`
+      )
+    }
+  }
+  return lines
+}
+
+const log = (lines: ReadonlyArray<string>) => Effect.forEach(lines, Console.log, { discard: true })
 
 // ---------------------------------------------------------------------------
 // ship create <project> [branch]
@@ -58,246 +117,113 @@ export const createCommand = Command.make(
   ({ project: projectOpt, branch: branchOpt, base: baseOpt }) =>
     Effect.gen(function* () {
       const config = yield* ConfigService
-      const proxy = yield* ProxyService
-      const git = yield* GitService
-      const db = yield* DatabaseService
-      const shell = yield* ShellService
       const editor = yield* EditorService
-      const sync = yield* SyncService
-      const env = yield* EnvService
+      const ws = yield* WorkspaceService
       const pathSvc = yield* Path.Path
 
-      // 1. Resolve project (prompt if not specified)
-      let project: string
+      // 1. Resolve project (prompt if not specified).
+      let projectInput: string
       if (Option.isSome(projectOpt)) {
-        project = projectOpt.value
+        projectInput = projectOpt.value
       } else {
         const shipConfig = yield* config.loadConfig()
-        const aliases = Object.keys(shipConfig.projects)
+        const aliases = Object.keys(shipConfig.projects) as Array<ProjectAlias>
         if (aliases.length === 0) {
-          yield* Console.log("")
-          yield* Console.log(`  ${red("✗")} No projects registered.`)
-          yield* Console.log(`  ${dim("Register one with: ship init")}`)
-          yield* Console.log("")
+          yield* log([
+            "",
+            `  ${red("✗")} No projects registered.`,
+            `  ${dim("Register one with: ship init")}`,
+            "",
+          ])
           return
         }
-        project = yield* Prompt.select({
+        projectInput = yield* Prompt.select({
           message: "Select a project",
           choices: aliases.map((alias) => ({
             title: alias,
             value: alias,
-            description: shipConfig.projects[alias]!.path
-          }))
+            description: shipConfig.projects[alias]!.path,
+          })),
         })
       }
 
+      const project = Schema.decodeSync(ProjectAlias)(projectInput)
       const projectConfig = yield* config.getProject(project)
 
-      // 2. Resolve branch
-      const branch = Option.isSome(branchOpt)
-        ? branchOpt.value
-        : yield* Prompt.text({ message: "Branch name:" })
-
-      // 3. Resolve base branch
-      const baseBranch = Option.isSome(baseOpt) ? baseOpt.value : undefined
-
-      // 4. Compute paths and names (deterministic from project + branch)
-      const branchSlug = toBranchSlug(branch)
-      const branchSlugSafe = toBranchSlugSafe(branch)
-      const vars = { branch_slug: branchSlug, branch_slug_safe: branchSlugSafe, project }
-      const worktreeDir = pathSvc.resolve(
-        projectConfig.path,
-        resolvePattern(projectConfig.worktree.dirPattern, vars)
+      // 2. Resolve branch.
+      const branch = Schema.decodeSync(BranchName)(
+        Option.isSome(branchOpt)
+          ? branchOpt.value
+          : yield* Prompt.text({ message: "Branch name:" })
       )
-      const proxyDomain = resolvePattern(projectConfig.worktree.proxyDomainPattern, vars)
-      const dbName = resolvePattern(projectConfig.worktree.dbNamePattern, vars)
 
-      // 5. Probe current state of every resource
-      const existingWs = yield* config.findWorkspace(project, branch)
-      const worktrees = yield* git.worktreeList(projectConfig.path).pipe(
-        Effect.orElseSucceed(() => [] as ReadonlyArray<{ path: string; branch: string }>)
-      )
-      const worktreeExists = worktrees.some((w) => w.path === worktreeDir)
+      const baseBranch = Option.fromNullable(Option.getOrUndefined(baseOpt))
 
-      const containerRunning = yield* db.isContainerRunning(projectConfig.database.container)
-      const dbAlreadyExists = containerRunning
-        ? yield* db.dbExists(projectConfig.database.container, projectConfig.database.user, dbName).pipe(
-            Effect.orElseSucceed(() => false)
-          )
-        : false
+      // Render context (derived names — single source of truth in domain).
+      const names = deriveNames(projectConfig.worktree, project, branch)
+      const baseCtx = {
+        branch,
+        worktreeDir: WorktreePath.make(pathSvc.resolve(projectConfig.path, names.worktreeDirRelative)),
+        dbName: names.dbName,
+        source: projectConfig.database.source,
+        proxyDomain: names.proxyDomain,
+      }
 
-      const existingRoutes = yield* proxy.getRoutes().pipe(
-        Effect.orElseSucceed(() => [] as ReadonlyArray<import("../services/proxy.js").Route>)
-      )
-      const existingRoute = existingRoutes.find((r) => r.domain === proxyDomain)
+      yield* Console.log("")
 
-      // 6. Pick port: reuse from registered workspace or existing route, else allocate fresh
-      const port = Option.isSome(existingWs)
-        ? existingWs.value.port
-        : existingRoute
-          ? existingRoute.port
-          : yield* proxy.nextPort()
+      // 3. Provision — collect the event stream, capture the completed result.
+      // (port is only settled at completion, so render with it once known.)
+      const events = yield* ws
+        .provision({ projectAlias: project, projectConfig, branch, baseBranch })
+        .pipe(Stream.runCollect, Effect.map((c) => Array.from(c)))
 
-      // 7. Fully-provisioned short-circuit → just open the editor
-      const allPresent =
-        Option.isSome(existingWs) && worktreeExists && dbAlreadyExists && !!existingRoute
-      if (allPresent) {
+      const completed = events.find((e) => e._tag === "completed")
+      if (completed === undefined || completed._tag !== "completed") {
+        yield* Console.log(`  ${green("Ready.")}`)
         yield* Console.log("")
-        yield* Console.log(`  Already exists: ${bold(branch)} in ${dim(existingWs.value.path)}`)
-        yield* Console.log(`  Proxy: ${blue(`https://${existingWs.value.proxyDomain}`)} → :${existingWs.value.port}`)
-        yield* Console.log("")
+        return
+      }
+      const result = completed.result
+      const renderCtx: RenderContext = { ...baseCtx, port: result.workspace.port }
+      yield* Effect.forEach(events, (e) => log(renderEvent(e, renderCtx)), { discard: true })
+
+      // Already fully provisioned → short-circuit message + open prompt.
+      if (result.alreadyComplete) {
+        const w = result.workspace
+        yield* log([
+          `  Already exists: ${bold(w.branch)} in ${dim(w.path)}`,
+          `  Proxy: ${blue(`https://${w.proxyDomain}`)} → :${w.port}`,
+          "",
+        ])
         const shouldOpen = yield* Prompt.confirm({ message: "Open in editor?", initial: true })
-        if (shouldOpen) yield* editor.open(existingWs.value.path)
+        if (shouldOpen) yield* editor.open(w.path)
         return
       }
 
-      // 8. Container must be running for db work
-      if (!containerRunning) {
-        yield* Console.log(`  ${red("✗")} Database container '${projectConfig.database.container}' is not running.`)
-        yield* Console.log(`    Start it first, then run this command again.`)
-        return
-      }
-
-      yield* Console.log("")
-      yield* Effect.logDebug("create", { repoPath: projectConfig.path, worktreeDir, branch, branchSlug, dirPattern: projectConfig.worktree.dirPattern })
-
-      const resuming =
-        Option.isSome(existingWs) || worktreeExists || dbAlreadyExists || !!existingRoute
-      if (resuming) {
-        yield* Console.log(`  ${yellow("↻")} Resuming partial setup...`)
-      }
-
-      // 9. Register workspace up front — so `ship down` can clean partial state
-      if (Option.isNone(existingWs)) {
-        yield* config.addWorkspace(
-          new Workspace({
-            project,
-            branch,
-            path: worktreeDir,
-            port,
-            dbName,
-            proxyDomain,
-            created: new Date().toISOString().split("T")[0]!,
-          })
-        )
-      }
-
-      // 10. Sync base (skip if worktree already on disk — don't move refs behind it)
-      if (!worktreeExists) {
-        const syncResult = yield* sync.sync(projectConfig, baseBranch).pipe(
-          Effect.catchAll((e) =>
-            Effect.succeed({
-              fetched: false, pulled: false, headMoved: false,
-              installed: false, migrated: false, skippedPull: e.message
-            } as import("../services/sync.js").SyncResult)
-          )
-        )
-        const baseLabel = baseBranch ?? "main"
-        if (syncResult.headMoved) {
-          yield* Console.log(`  ${green("✓")} Base updated   ${dim(`${baseLabel} fast-forwarded`)}`)
-          if (syncResult.migrated) {
-            yield* Console.log(`  ${green("✓")} Base migrated  ${dim(projectConfig.database.source)}`)
-          }
-        } else if (syncResult.skippedPull) {
-          yield* Console.log(`  ${yellow("⚠")} Base sync      ${dim(syncResult.skippedPull)}`)
-        } else if (syncResult.fetched) {
-          yield* Console.log(`  ${dim("  · Base           already up to date")}`)
-        }
-      }
-
-      // 11. Git worktree
-      if (worktreeExists) {
-        yield* Console.log(`  ${dim("•")} Branch         ${bold(branch)} ${dim("(already present)")}`)
-        yield* Console.log(`  ${dim("•")} Worktree       ${dim(worktreeDir)} ${dim("(already present)")}`)
-      } else {
-        yield* git.worktreeAdd(projectConfig.path, worktreeDir, branch, baseBranch)
-        yield* Console.log(`  ${green("✓")} Branch         ${bold(branch)}`)
-        yield* Console.log(`  ${green("✓")} Worktree       ${dim(worktreeDir)}`)
-      }
-
-      // 12. Database
-      if (dbAlreadyExists) {
-        yield* Console.log(`  ${dim("•")} Database       ${bold(dbName)} ${dim("(already present)")}`)
-      } else {
-        yield* db.cloneDb(
-          projectConfig.database.container,
-          projectConfig.database.user,
-          projectConfig.database.source,
-          dbName
-        )
-        yield* Console.log(`  ${green("✓")} Database       ${bold(dbName)} ${dim(`(cloned from ${projectConfig.database.source})`)}`)
-      }
-
-      // 13. Patch .env files (idempotent — rewrites from source template)
-      yield* Console.log("")
-      yield* Console.log(`  Configuring environment...`)
-      const patchResults = yield* env.patchEnvFiles(
-        projectConfig.path,
-        worktreeDir,
-        projectConfig.env,
-        { dbName, proxyDomain, port }
-      )
-      for (const result of patchResults) {
-        if (result.changes.length > 0) {
-          yield* Console.log(`    ${blue(result.file)}:`)
-          for (const change of result.changes) {
-            yield* Console.log(
-              `      ${dim(change.key.padEnd(25))} ${abbreviateValue(change.from)} → ${abbreviateValue(change.to)}`
-            )
-          }
-        }
-      }
-
-      // 14. Install dependencies
-      if (projectConfig.commands.install) {
+      // Env changes (rendered from the result).
+      const envLines = renderEnvChanges(result.envChanges)
+      if (envLines.length > 0) {
         yield* Console.log("")
-        yield* Console.log(`  Installing dependencies...`)
-        yield* shell.execInDir(worktreeDir, projectConfig.commands.install)
-        yield* Console.log(`  ${green("✓")} Dependencies   installed`)
+        yield* Console.log(`  Configuring environment...`)
+        yield* log(envLines)
       }
 
-      // 15. Generate (e.g., Prisma client)
-      if (projectConfig.commands.generate) {
-        yield* shell.execInDir(worktreeDir, projectConfig.commands.generate)
-      }
-
-      // 16. Run migrations
-      if (projectConfig.commands.migrate) {
-        yield* Console.log(`  Running migrations...`)
-        yield* shell.execInDir(worktreeDir, projectConfig.commands.migrate)
-        yield* Console.log(`  ${green("✓")} Migrations     applied`)
-      }
-
-      // 17. Proxy route
-      if (existingRoute) {
-        yield* Console.log(`  ${dim("•")} Proxy          https://${bold(proxyDomain)} → :${blue(String(port))} ${dim("(already present)")}`)
-      } else {
-        yield* proxy.addRoute(proxyDomain, port).pipe(Effect.catchAll(() => Effect.void))
-        yield* Console.log(`  ${green("✓")} Proxy          https://${bold(proxyDomain)} → :${blue(String(port))}`)
-      }
-
-      // 15. Auto-open editor
+      // 4. Auto-open editor (prompt once; persist preference).
       yield* Console.log("")
       const shipConfig = yield* config.loadConfig()
       let shouldOpen = shipConfig.autoOpenEditor
-
       if (shouldOpen === undefined) {
-        shouldOpen = yield* Prompt.confirm({
-          message: "Open workspace in editor?",
-          initial: true
-        })
+        shouldOpen = yield* Prompt.confirm({ message: "Open workspace in editor?", initial: true })
         yield* config.saveConfig(new ShipConfig({ ...shipConfig, autoOpenEditor: shouldOpen }))
       }
-
-      if (shouldOpen) {
-        yield* editor.open(worktreeDir)
-      }
+      if (shouldOpen) yield* editor.open(result.workspace.path)
 
       yield* Console.log(`  ${green("Ready.")}`)
       yield* Console.log("")
     }).pipe(
-      Effect.catchAll((e) =>
-        Console.error(`\n  ${red("Error:")} ${e.message}\n`)
-      )
+      Effect.catchTag("DatabaseUnreachableError", (e) =>
+        log(["", `  ${red("✗")} ${e.message}`, `    Start it first, then run this command again.`, ""])
+      ),
+      Effect.catchAll((e) => Console.error(`\n  ${red("Error:")} ${e.message}\n`))
     )
 )

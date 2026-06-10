@@ -76,6 +76,28 @@ export class ShellExecError extends Schema.TaggedError<ShellExecError>()(
 }
 
 // ---------------------------------------------------------------------------
+// Database errors
+// ---------------------------------------------------------------------------
+
+export class DatabaseError extends Schema.TaggedError<DatabaseError>()(
+  "DatabaseError",
+  { op: Schema.String, database: Schema.String, detail: Schema.String }
+) {
+  get message() {
+    return `Database ${this.op} failed for '${this.database}': ${this.detail}`
+  }
+}
+
+export class DatabaseUnreachableError extends Schema.TaggedError<DatabaseUnreachableError>()(
+  "DatabaseUnreachableError",
+  { runtime: Schema.String }
+) {
+  get message() {
+    return `Database (${this.runtime}) is not reachable. Start it first, then re-run.`
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Proxy errors
 // ---------------------------------------------------------------------------
 

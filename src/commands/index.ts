@@ -5,24 +5,9 @@ import { GitService } from "../services/git.js"
 import { DatabaseService } from "../services/database.js"
 import { ProxyService } from "../services/proxy.js"
 import { Workspace } from "../schema/workspace.js"
+import { BranchName, HostPort, ProjectAlias, WorktreePath } from "../schema/ids.js"
+import { deriveNames } from "../domain/workspace-name.js"
 import { bold, dim, green, yellow, red, blue } from "../fmt.js"
-
-// ---------------------------------------------------------------------------
-// Helpers — mirror create.ts pattern resolution so indexed entries line up
-// with what `ship create` would have produced.
-// ---------------------------------------------------------------------------
-
-const toBranchSlug = (branch: string) => branch.replace(/\//g, "-")
-const toBranchSlugSafe = (branch: string) =>
-  branch.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()
-
-const resolvePattern = (pattern: string, vars: Record<string, string>): string => {
-  let result = pattern
-  for (const [key, value] of Object.entries(vars)) {
-    result = result.replace(new RegExp(`\\{${key}\\}`, "g"), value)
-  }
-  return result
-}
 
 // ---------------------------------------------------------------------------
 // ship index [project] [--all] [--dry-run]
@@ -76,10 +61,10 @@ export const indexCommand = Command.make(
           Effect.orElseSucceed(() => [] as ReadonlyArray<{ path: string; branch: string }>)
         )
 
-        const registeredPaths = new Set(
+        const registeredPaths = new Set<string>(
           existingWorkspaces.filter((w) => w.project === alias).map((w) => w.path)
         )
-        const registeredBranches = new Set(
+        const registeredBranches = new Set<string>(
           existingWorkspaces.filter((w) => w.project === alias).map((w) => w.branch)
         )
         const candidates = worktrees.filter(
@@ -97,35 +82,36 @@ export const indexCommand = Command.make(
 
         totalCandidates += candidates.length
 
-        const containerRunning = yield* db.isContainerRunning(projectConfig.database.container)
+        const dbTarget = {
+          runtime: projectConfig.database.runtime,
+          user: projectConfig.database.user,
+        }
+        const containerRunning = yield* db.ping(dbTarget)
         if (!containerRunning) {
           yield* Console.log(
-            `  ${yellow("⚠")} Container '${projectConfig.database.container}' not running — DB existence not verified.`
+            `  ${yellow("⚠")} Database not reachable — DB existence not verified.`
           )
         }
 
         for (const wt of candidates) {
-          const branchSlug = toBranchSlug(wt.branch)
-          const branchSlugSafe = toBranchSlugSafe(wt.branch)
-          const vars = { branch_slug: branchSlug, branch_slug_safe: branchSlugSafe, project: alias }
-          const expectedDbName = resolvePattern(projectConfig.worktree.dbNamePattern, vars)
-          const expectedProxyDomain = resolvePattern(projectConfig.worktree.proxyDomainPattern, vars)
+          // `wt.branch` is a plain string off git.worktreeList — construct the
+          // BranchName brand at this edge before deriving names.
+          const branch = BranchName.make(wt.branch)
+          const names = deriveNames(projectConfig.worktree, ProjectAlias.make(alias), branch)
+          const expectedDbName = names.dbName
+          const expectedProxyDomain = names.proxyDomain
 
           const dbFound = containerRunning
-            ? yield* db.dbExists(
-                projectConfig.database.container,
-                projectConfig.database.user,
-                expectedDbName
-              )
+            ? yield* db.exists(dbTarget, expectedDbName)
             : false
 
           const route = existingRoutes.find((r) => r.domain === expectedProxyDomain)
-          let port: number
+          let port: HostPort
           if (route) {
             port = route.port
           } else {
             port = yield* proxy.nextPort()
-            while (usedPorts.has(port)) port++
+            while (usedPorts.has(port)) port = HostPort.make(port + 1)
             usedPorts.add(port)
           }
 
@@ -163,9 +149,9 @@ export const indexCommand = Command.make(
 
           yield* config.addWorkspace(
             new Workspace({
-              project: alias,
-              branch: wt.branch,
-              path: wt.path,
+              project: ProjectAlias.make(alias),
+              branch,
+              path: WorktreePath.make(wt.path),
               port,
               dbName: expectedDbName,
               proxyDomain: expectedProxyDomain,

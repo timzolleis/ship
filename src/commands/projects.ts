@@ -1,6 +1,7 @@
 import { Command } from "@effect/cli"
 import { Console, Effect } from "effect"
 import { ConfigService } from "../services/config.js"
+import { dockerContainerOf } from "../schema/config.js"
 import { bold, dim, blue } from "../fmt.js"
 
 // ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ export const projectsCommand = Command.make(
 
       for (const [alias, project] of entries) {
         yield* Console.log(
-          `  ${bold(alias.padEnd(aliasWidth))}  ${blue(project.path.padEnd(40))}  ${project.database.container}`
+          `  ${bold(alias.padEnd(aliasWidth))}  ${blue(project.path.padEnd(40))}  ${dockerContainerOf(project.database)}`
         )
       }
 

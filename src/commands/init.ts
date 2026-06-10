@@ -157,21 +157,32 @@ export const initCommand = Command.make(
       yield* Console.log(`  Detected: ${bold(dirName)} (${dim(cwd)})`)
       yield* Console.log("")
 
+      // Existing registration (matched by cwd) seeds the alias prompt
+      const shipConfig = yield* config.loadConfig()
+      const aliasForCwd = Object.entries(shipConfig.projects).find(([, p]) => p.path === cwd)?.[0]
+
       // 1. Project alias
-      const alias = yield* resolve(opts.alias, "Project alias:", dirName.substring(0, 3))
+      const alias = yield* resolve(opts.alias, "Project alias:", aliasForCwd ?? dirName.substring(0, 3))
+
+      // Re-running init on a known alias updates it — prompts default to stored values
+      const existing = shipConfig.projects[alias]
+      if (existing) {
+        yield* Console.log(`  ${dim(`Updating existing project "${alias}" — press enter to keep current values.`)}`)
+        yield* Console.log("")
+      }
 
       // 2. Project path
-      const projectPath = yield* resolve(opts.path, "Project path:", cwd)
+      const projectPath = yield* resolve(opts.path, "Project path:", existing?.path ?? cwd)
 
       // 3. Auto-detect .env files
       yield* Console.log("")
       yield* Console.log(`  Scanning for .env files...`)
       const detected = yield* detectEnvFiles
 
-      let inferredDbUser = "postgres"
-      let inferredDbHost = "localhost"
-      let inferredDbPort = 5432
-      let inferredDbSource = "postgres"
+      let inferredDbUser = existing?.database.user ?? "postgres"
+      let inferredDbHost = existing?.database.host ?? "localhost"
+      let inferredDbPort = existing?.database.port ?? 5432
+      let inferredDbSource = existing?.database.source ?? "postgres"
       const allEnvFiles: string[] = []
       const allDetectedVars: Record<string, EnvVarConfig> = {}
 
@@ -206,22 +217,22 @@ export const initCommand = Command.make(
       }
 
       // 4. Database config (confirm or override)
-      const dbContainer = yield* resolve(opts.dbContainer, "Database container name:", "postgres")
+      const dbContainer = yield* resolve(opts.dbContainer, "Database container name:", existing?.database.container ?? "postgres")
       const dbUser = yield* resolve(opts.dbUser, "Database user:", inferredDbUser)
       const dbSource = yield* resolve(opts.dbSource, "Source database to clone from:", inferredDbSource)
 
       // 5. Commands
-      const installCmd = yield* resolve(opts.installCmd, "Install command:", "pnpm install")
-      const generateCmd = yield* resolve(opts.generateCmd, "Generate command (e.g. prisma):", "pnpm db generate")
-      const migrateCmd = yield* resolve(opts.migrateCmd, "Migrate command:", "pnpm db migrate:deploy")
-      const devCmd = yield* resolve(opts.devCmd, "Dev command:", "pnpm dev -p {port}")
+      const installCmd = yield* resolve(opts.installCmd, "Install command:", existing?.commands.install ?? "pnpm install")
+      const generateCmd = yield* resolve(opts.generateCmd, "Generate command (e.g. prisma):", existing?.commands.generate ?? "pnpm db generate")
+      const migrateCmd = yield* resolve(opts.migrateCmd, "Migrate command:", existing?.commands.migrate ?? "pnpm db migrate:deploy")
+      const devCmd = yield* resolve(opts.devCmd, "Dev command:", existing?.commands.dev ?? "pnpm dev -p {port}")
 
       // 6. Root checkout route — reuse domain/port if the project was registered before
-      const existing = (yield* config.loadConfig()).projects[alias]
       const rootDomain = existing?.domain ?? `${alias}.localhost`
       const rootPort = existing?.port ?? (yield* proxy.nextPort())
 
-      // 7. Build the config
+      // 7. Build the config — merge env with existing (manual tweaks like dev_url
+      // paths win over fresh detection), keep customized worktree patterns
       const project = new ProjectConfig({
         path: projectPath,
         domain: rootDomain,
@@ -238,12 +249,13 @@ export const initCommand = Command.make(
           generate: generateCmd,
           migrate: migrateCmd,
           dev: devCmd,
+          seed: existing?.commands.seed,
         }),
         env: new EnvConfig({
-          files: allEnvFiles,
-          autoDetected: allDetectedVars,
+          files: [...new Set([...(existing?.env.files ?? []), ...allEnvFiles])],
+          autoDetected: { ...allDetectedVars, ...(existing?.env.autoDetected ?? {}) },
         }),
-        worktree: new WorktreeConfig({
+        worktree: existing?.worktree ?? new WorktreeConfig({
           dirPattern: `../${dirName}-{branch_slug}/`,
           proxyDomainPattern: `{branch_slug}.${alias}.localhost`,
           dbNamePattern: `${alias}_{branch_slug_safe}`,
@@ -257,7 +269,7 @@ export const initCommand = Command.make(
       )
 
       yield* Console.log("")
-      yield* Console.log(`  ${green("✓")} Project ${bold(`"${alias}"`)} registered.`)
+      yield* Console.log(`  ${green("✓")} Project ${bold(`"${alias}"`)} ${existing ? "updated" : "registered"}.`)
       yield* Console.log(`  ${green("✓")} Root route     https://${bold(rootDomain)} → :${blue(String(rootPort))}`)
       yield* Console.log("")
     }).pipe(

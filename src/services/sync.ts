@@ -3,7 +3,7 @@ import type { ShellExecError } from "../errors.js"
 import type { ProjectConfig } from "../schema/config.js"
 import { DatabaseService } from "./database.js"
 import { GitService } from "./git.js"
-import { ShellService } from "./shell.js"
+import { nonInteractiveEnv, ShellService } from "./shell.js"
 
 // ---------------------------------------------------------------------------
 // SyncService — Tier 3 orchestrator (D7: real `layer` only, no layerMemory).
@@ -118,11 +118,11 @@ export class SyncService extends Context.Tag("ship/SyncService")<
 
           if (headMoved) {
             if (config.commands.install) {
-              yield* shell.execInDir(repoPath, config.commands.install)
+              yield* shell.execInDir(repoPath, config.commands.install, nonInteractiveEnv)
               installed = true
             }
             if (config.commands.generate) {
-              yield* shell.execInDir(repoPath, config.commands.generate)
+              yield* shell.execInDir(repoPath, config.commands.generate, nonInteractiveEnv)
             }
             if (config.commands.migrate) {
               const running = yield* db.ping({
@@ -130,7 +130,7 @@ export class SyncService extends Context.Tag("ship/SyncService")<
                 user: config.database.user,
               })
               if (running) {
-                yield* shell.execInDir(repoPath, config.commands.migrate)
+                yield* shell.execInDir(repoPath, config.commands.migrate, nonInteractiveEnv)
                 migrated = true
               }
             }

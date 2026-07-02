@@ -6,6 +6,11 @@ import { ShellExecError } from "../errors.js"
 // ShellService
 // ---------------------------------------------------------------------------
 
+// Lifecycle commands (install/generate/migrate/seed) run without a controlling
+// prompt loop — CI=true makes tools like pnpm 11 (confirmModulesPurge) skip
+// interactive confirmations instead of hanging or erroring.
+export const nonInteractiveEnv = { CI: "true" }
+
 export interface ExecResult {
   readonly stdout: string
   readonly stderr: string

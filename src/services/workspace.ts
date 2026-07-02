@@ -27,7 +27,7 @@ import { DatabaseService, type DatabaseTarget } from "./database.js"
 import { EnvService, type PatchResult } from "./env.js"
 import { GitService } from "./git.js"
 import { ProxyService } from "./proxy.js"
-import { ShellService } from "./shell.js"
+import { nonInteractiveEnv, ShellService } from "./shell.js"
 import { SyncService, type SyncResult } from "./sync.js"
 
 // ---------------------------------------------------------------------------
@@ -340,15 +340,15 @@ export class WorkspaceService extends Context.Tag("ship/WorkspaceService")<
 
             // 8e. install / generate / migrate (only when configured).
             if (pc.commands.install) {
-              yield* shell.execInDir(worktreeDir, pc.commands.install)
+              yield* shell.execInDir(worktreeDir, pc.commands.install, nonInteractiveEnv)
               emit(step("install", "done"))
             }
             if (pc.commands.generate) {
-              yield* shell.execInDir(worktreeDir, pc.commands.generate)
+              yield* shell.execInDir(worktreeDir, pc.commands.generate, nonInteractiveEnv)
               emit(step("generate", "done"))
             }
             if (pc.commands.migrate) {
-              yield* shell.execInDir(worktreeDir, pc.commands.migrate)
+              yield* shell.execInDir(worktreeDir, pc.commands.migrate, nonInteractiveEnv)
               emit(step("migrate", "done"))
             }
 
@@ -493,13 +493,13 @@ export class WorkspaceService extends Context.Tag("ship/WorkspaceService")<
 
             // migrate (if configured).
             if (pc.commands.migrate) {
-              yield* shell.execInDir(ws.path, pc.commands.migrate)
+              yield* shell.execInDir(ws.path, pc.commands.migrate, nonInteractiveEnv)
               events.push(step("migrate", "done"))
             }
 
             // seed (if fresh && configured).
             if (opts.fresh && pc.commands.seed) {
-              yield* shell.execInDir(ws.path, pc.commands.seed)
+              yield* shell.execInDir(ws.path, pc.commands.seed, nonInteractiveEnv)
               events.push(step("seed", "done"))
             }
 

@@ -5,14 +5,16 @@ Project-aware worktree + proxy + database manager. One command to create isolate
 ## Install
 
 ```bash
-# Build from source (requires bun)
+# Build from source (requires rust)
 git clone <repo-url> && cd ship
-bun install
-bun build src/main.ts --compile --outfile ship
+cargo build --release
 
 # Move to PATH
-cp ship ~/.local/bin/ship
+cp target/release/ship ~/.local/bin/ship
 ```
+
+Or grab a prebuilt binary (`ship-darwin-arm64` / `ship-darwin-x64`) from the
+latest GitHub release. Once installed, `ship update` keeps it current.
 
 ## Quick Start
 
@@ -318,21 +320,22 @@ All config lives in `~/.config/ship/`:
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) (for building)
+- [Rust](https://rustup.rs) (for building from source)
 - [Docker](https://docker.com) (for Caddy proxy and database operations)
 - Git
 
 ## Development
 
 ```bash
-bun install
-bun run dev -- <args>          # Run from source
-bun run typecheck              # Type check
-bun run build                  # Build binary
+cargo run -- <args>            # Run from source
+cargo check                    # Type check
+cargo clippy                   # Lint
+cargo build --release          # Build binary (target/release/ship)
 ```
 
 ## Built with
 
-- [Effect](https://effect.website) — typed functional programming
-- [@effect/cli](https://github.com/Effect-TS/effect/tree/main/packages/cli) — commands, args, options, interactive prompts
+- [clap](https://github.com/clap-rs/clap) — commands, args, options
+- [dialoguer](https://github.com/console-rs/dialoguer) — interactive prompts
+- [serde](https://serde.rs) — config (de)serialization
 - [Caddy](https://caddyserver.com) — automatic HTTPS reverse proxy

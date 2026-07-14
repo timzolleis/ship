@@ -13,55 +13,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - { os: darwin, arch: arm64 }
-          - { os: darwin, arch: x64 }
-    outputs:
-      sha: ${{ steps.sha.outputs.short }}
+  release:
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile || bun install
+      - uses: actions/checkout@v6
 
       - id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Build ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2.9.1
+
+      # SHIP_VERSION pins the embedded version to the release tag below —
+      # `ship update` compares them for equality, so they must match exactly.
+      - name: Build darwin binaries
+        env:
+          SHIP_VERSION: ${{ steps.sha.outputs.short }}
         run: |
-          bun build src/main.ts \
-            --compile \
-            --minify \
-            --sourcemap \
-            --bytecode \
-            --target=bun-${{ matrix.target.os }}-${{ matrix.target.arch }} \
-            --define SHIP_VERSION_CONST="\"${{ steps.sha.outputs.short }}\"" \
-            --outfile ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cp target/aarch64-apple-darwin/release/ship ship-darwin-arm64
+          cp target/x86_64-apple-darwin/release/ship ship-darwin-x64
+          codesign --sign - --force ship-darwin-arm64
+          codesign --sign - --force ship-darwin-x64
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
-          path: ship-${{ matrix.target.os }}-${{ matrix.target.arch }}
-          if-no-files-found: error
-          retention-days: 1
+      - name: Smoke test
+        run: |
+          ./ship-darwin-arm64 --version | grep -F "${{ steps.sha.outputs.short }}"
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
+      - name: Create release ${{ steps.sha.outputs.short }}
+        uses: softprops/action-gh-release@v3
         with:
-          path: dist
-          merge-multiple: true
-
-      - name: Create release ${{ needs.build.outputs.sha }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.build.outputs.sha }}
-          name: ${{ needs.build.outputs.sha }}
+          tag_name: ${{ steps.sha.outputs.short }}
+          name: ${{ steps.sha.outputs.short }}
           target_commitish: ${{ github.sha }}
-          files: dist/ship-*
+          files: ship-darwin-*
           fail_on_unmatched_files: true

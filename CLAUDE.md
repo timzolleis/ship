@@ -2,82 +2,66 @@
 
 ## Overview
 
-**ship** is a CLI tool for managing project-aware git worktrees, databases, and an HTTPS reverse proxy. Built with Effect-TS, @effect/cli, and @effect/platform. Compiled to a standalone binary via Bun.
+**ship** is a CLI tool for managing project-aware git worktrees, databases, and an HTTPS reverse proxy. Written in Rust (clap, serde, dialoguer, ureq). Compiles to a small static binary (~2.3 MB release).
 
 ## Commands
 
 ```bash
-bun run src/main.ts          # Dev run
-bun run build                # Compile to ./ship binary
-bun run typecheck            # tsc --noEmit
+cargo run -- <args>          # Dev run (version reports "dev"; update checks disabled)
+cargo build --release        # Release binary at target/release/ship
+cargo check                  # Typecheck
+cargo clippy                 # Lint — must stay warning-free
 ```
 
-After build, copy `./ship` to `~/.local/bin/ship`.
+After build, copy `target/release/ship` to `~/.local/bin/ship`.
 
 ## Architecture
 
 ```
 src/
-├── main.ts              # CLI entry, layer composition
-├── fmt.ts               # Shared ANSI formatting (bold, dim, green, red, blue, yellow)
-├── errors.ts            # Schema.TaggedError domain errors
-├── schema/
-│   ├── config.ts        # ShipConfig, ProjectConfig, DatabaseConfig, etc.
-│   └── workspace.ts     # Workspace, Workspaces
-├── services/
-│   ├── shell.ts         # ShellService — command execution (wraps CommandExecutor)
-│   ├── git.ts           # GitService — worktree/branch ops (depends on Shell)
-│   ├── database.ts      # DatabaseService — docker exec postgres ops (depends on Shell)
-│   ├── config.ts        # ConfigService — ~/.config/ship/ config + workspace registry
-│   ├── proxy.ts         # ProxyService — Caddy reverse proxy (depends on Shell)
-│   ├── editor.ts        # EditorService — detect & open editors (depends on Shell, Config)
-│   ├── env.ts           # patchEnvFiles() — .env copying/patching (standalone function)
-│   └── claude.ts        # ClaudeService — clears ~/.claude/projects/<slug>/ on teardown
-└── commands/
-    ├── init.ts          # Register project (interactive)
-    ├── create.ts        # Create workspace (worktree + db + env + proxy)
-    ├── down.ts          # Tear down workspace
-    ├── up.ts            # Start dev server + proxy
-    ├── list.ts          # List workspaces
-    ├── open.ts          # Open editor/url/db
-    ├── reset.ts         # Reset workspace database
-    ├── gc.ts            # Clean up merged-PR workspaces
-    ├── db.ts            # Database subcommands (exec)
-    └── proxy/proxy.ts   # Proxy subcommands (start/stop/status/add/rm/trust/edit)
+├── main.rs              # clap CLI definition, custom help text, dispatch, post-run update hooks
+├── version.rs           # VERSION: "dev" in debug builds, git short SHA in release (via build.rs)
+├── errors.rs            # thiserror Error enum — one variant per failure mode, user-facing Display
+├── fmt.rs               # Shared ANSI formatting (bold, dim, green, red, blue, yellow)
+├── prompt.rs            # dialoguer wrappers (input/confirm/select) returning crate errors
+├── schema.rs            # serde models: ShipConfig, ProjectConfig, Workspace, UpdateCache
+├── util.rs              # resolve_path (Node path.resolve semantics), cwd_string, plural
+├── domain/              # Pure logic — no IO, no subprocesses
+│   ├── caddyfile.rs     # Route codec + next_port allocation
+│   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url)
+│   ├── workspace_locate.rs  # cwd/branch-query → workspace resolution
+│   └── workspace_name.rs    # Slugging + {placeholder} pattern resolution
+├── services/            # IO layer — plain module functions
+│   ├── shell.rs         # Subprocess exec (captured, interactive, sh -c in dir)
+│   ├── runner.rs        # ExecutionRuntime dispatch: local passthrough vs docker exec
+│   ├── git.rs           # Worktree/branch ops over shell
+│   ├── database.rs      # Postgres CLI ops (createdb/dropdb/psql/pg_dump) over runner
+│   ├── config.rs        # ~/.config/ship/ config + workspace registry (self-migrating load)
+│   ├── proxy.rs         # Caddy reverse proxy via docker
+│   ├── editor.rs        # Detect & open editors ($VISUAL/$EDITOR → GUI apps → terminal)
+│   ├── env.rs           # .env file copying/patching (delegates rewriting to domain)
+│   ├── claude.rs        # Clears ~/.claude/projects/<slug>/ on teardown
+│   ├── sync.rs          # Fetch + ff-pull base checkout, install/generate/migrate on HEAD move
+│   ├── updater.rs       # GitHub-release self-update + background version-check cache
+│   └── workspace.rs     # Orchestrator: provision / teardown / reset state machines
+└── commands/            # One module per subcommand; owns rendering + error printing
 ```
 
-## Layer Composition
+## Key Conventions
 
-```
-NodeContext.layer (FileSystem, Path, CommandExecutor, Terminal)
-  └─ ShellServiceLive
-       ├─ GitServiceLive
-       ├─ DatabaseServiceLive
-       └─ ProxyServiceLive (+ NodeContext)
-  └─ ConfigServiceLive (+ NodeContext)
-  └─ EditorServiceLive (+ ShellLive + ConfigLive + NodeContext)
-```
+- **Layering**: commands → services → domain. Domain modules are pure (no IO); services do IO through `shell`/`runner`; commands only render and prompt. Don't shell out from commands directly.
+- **Errors**: one `Error` variant per failure mode in `src/errors.rs`, with the user-facing message in `#[error(...)]`. Commands catch at their boundary and print (`eprintln!("\n  {} {}\n", red("Error:"), e)` or command-specific formats) — they don't propagate to `main`.
+- **Nonzero exits**: `shell::exec` (captured) fails on nonzero exit; `exec_interactive`/`exec_in_dir` (inherited stdio) deliberately do NOT — only spawn failures error. A failing dev server must not fail `ship up`.
+- **Formatting**: import from `src/fmt.rs`. Never define local ANSI helpers. Pad columns BEFORE colorizing (ANSI codes break format widths).
+- **Prompts**: through `src/prompt.rs` only (it strips trailing `:` — dialoguer adds its own).
+- **Editor opening**: always `editor::open()`, never exec an editor directly.
+- **Config JSON**: camelCase keys, 2-space pretty print, trailing newline. `IndexMap` preserves key order. Legacy `database.container` shape is decoded and canonically written back on load — keep that tolerance.
+- **Versioning**: `build.rs` embeds the git short SHA (or `$SHIP_VERSION` when set — CI uses this to pin the binary version to the release tag). Debug builds report `dev`, which disables update checks and self-update.
+- **Clippy after every change**: `cargo clippy` must stay warning-free.
 
-All services are `Context.Tag` + `Layer.effect`. The layer yields dependencies once; methods return `Effect<A, E>` with no R requirement. Commands access services via `yield* ServiceName`.
+## Error Variants (src/errors.rs)
 
-## Effect Patterns
-
-| Pattern | How |
-|---------|-----|
-| Services | `Context.Tag` + `Layer.effect`, deps yielded in layer constructor |
-| Errors | `Schema.TaggedError` — yieldable (no `Effect.fail()` needed) |
-| Error handling | `catchTag` for specific, `catchAll` at CLI boundary |
-| Shell execution | All through `ShellService` (never raw `CommandExecutor` in commands) |
-| File I/O | Via `FileSystem.FileSystem` from @effect/platform |
-| Formatting | Shared `src/fmt.ts` (never define local ANSI helpers) |
-
-## Error Types (src/errors.ts)
-
-- `ProjectNotFoundError` — project alias not in config
-- `InvalidConfigError` — schema decode/encode failure
-- `RouteExistsError` — proxy route already exists
-- `RouteNotFoundError` — proxy route not found
-- `CertNotFoundError` — Caddy CA cert not generated yet
+`ProjectNotFound`, `ParseConfig`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `RouteNotFound`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `Prompt`.
 
 ## Config Storage
 
@@ -87,15 +71,11 @@ All state lives in `~/.config/ship/`:
 |------|----------|
 | `config.json` | Projects, editor pref, autoOpenEditor |
 | `workspaces.json` | Active workspace entries |
+| `update-cache.json` | Last release check (refreshed by hidden `__refresh-update-cache` worker) |
 | `Caddyfile` | Caddy reverse proxy routes |
 | `caddy-data/` | Caddy TLS certificates |
 | `caddy-config/` | Caddy runtime config |
 
-## Key Conventions
+## Release Pipeline
 
-- **New services**: `Context.Tag` + `Layer.effect` with deps yielded in layer. Export `FooServiceLive`.
-- **New errors**: `Schema.TaggedError` in `src/errors.ts`. Use `get message()` for user-facing text.
-- **New commands**: Use services from context (`yield* ServiceName`). Never access `CommandExecutor` directly.
-- **Formatting**: Import from `src/fmt.ts`. Never define local `bold`/`dim`/etc.
-- **Editor opening**: Always use `EditorService.open()`, never shell exec an editor directly.
-- **Typecheck after every change**: `bun run typecheck` must pass before building.
+`.github/workflows/release.yml`: every push to `main` builds `ship-darwin-arm64` + `ship-darwin-x64` on a macOS runner (arm64 natively, x64 via `x86_64-apple-darwin` target), ad-hoc codesigns them, and publishes a GitHub release tagged with the git short SHA. `ship update` matches its embedded version against the latest release tag and swaps the binary in place, so tag, `SHIP_VERSION`, and asset names must stay in lockstep.

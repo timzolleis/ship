@@ -21,9 +21,11 @@ fn app_exists(app: &str) -> bool {
 }
 
 /// Try to open path: CLI command first, then `open -a` fallback for GUI editors.
+/// GUI editors get `-n` so ship opens a new window instead of hijacking the
+/// focused one — their default is to reuse the active window.
 fn open_with(editor: &str, path: &str) -> bool {
     if let Some((_, app)) = GUI_EDITORS.iter().find(|(cmd, _)| *cmd == editor) {
-        return try_exec(editor, &[path]) || try_exec("open", &["-a", app, path]);
+        return try_exec(editor, &["-n", path]) || try_exec("open", &["-n", "-a", app, path]);
     }
     try_exec(editor, &[path])
 }

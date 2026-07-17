@@ -14,6 +14,19 @@ pub fn input(msg: &str, default: Option<&str>) -> Result<String> {
     Ok(p.interact_text()?)
 }
 
+// Blank submissions are allowed (dialoguer rejects them by default). The seed
+// is editable initial text rather than a default so the user can clear it and
+// submit blank — a default would win over an empty line.
+pub fn input_optional(msg: &str, initial: Option<&str>) -> Result<String> {
+    let mut p = dialoguer::Input::<String>::new()
+        .with_prompt(clean(msg))
+        .allow_empty(true);
+    if let Some(text) = initial {
+        p = p.with_initial_text(text.to_string());
+    }
+    Ok(p.interact_text()?)
+}
+
 pub fn confirm(msg: &str, default: bool) -> Result<bool> {
     Ok(dialoguer::Confirm::new()
         .with_prompt(clean(msg))

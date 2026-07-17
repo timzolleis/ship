@@ -3,7 +3,7 @@ use crate::fmt::{blue, bold, dim, green};
 use crate::prompt;
 use crate::schema::{
     CommandsConfig, DatabaseConfig, EnvConfig, EnvVarConfig, EnvVarType, ExecutionRuntime,
-    ProjectConfig, WorktreeConfig,
+    ProjectConfig, ShipConfig, WorktreeConfig,
 };
 use crate::services::{config, proxy};
 use crate::util::cwd_string;
@@ -156,9 +156,9 @@ fn prompt_scope(
         } else {
             format!("{label} command #{} (blank to finish):", i + 1)
         };
-        let default = seed.get(i).map(|s| s.as_str());
-        // First entry is required-ish (has a default); later entries end on blank.
-        let value = prompt::input(&msg, default)?;
+        // Seed as editable initial text, not a dialoguer default — a default
+        // would refill on blank submit and "blank to finish" could never fire.
+        let value = prompt::input_optional(&msg, seed.get(i).map(|s| s.as_str()))?;
         if value.trim().is_empty() {
             break;
         }
@@ -189,8 +189,19 @@ fn run_inner(opts: InitArgs) -> Result<()> {
     println!("  Detected: {} ({})", bold(&dir_name), dim(&cwd));
     println!();
 
-    // Existing registration (matched by cwd) seeds the alias prompt.
-    let ship_config = config::load_config()?;
+    // Existing registration (matched by cwd) seeds the alias prompt. A config
+    // that no longer parses would otherwise dead-loop ("run ship init" → init
+    // fails the same way), so init discards it and starts fresh.
+    let ship_config = match config::load_config() {
+        Ok(c) => c,
+        Err(Error::ConfigOutdated { .. }) | Err(Error::ParseConfig { .. }) => {
+            println!("  {}", dim("Existing config could not be parsed — starting fresh."));
+            println!();
+            config::delete_config()?;
+            ShipConfig::default()
+        }
+        Err(e) => return Err(e),
+    };
     let alias_for_cwd = ship_config
         .projects
         .iter()

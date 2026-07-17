@@ -63,6 +63,17 @@ pub fn load_config() -> Result<ShipConfig> {
     })
 }
 
+pub fn delete_config() -> Result<()> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path).map_err(|e| Error::WriteFile {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+    })
+}
+
 pub fn save_config(config: &ShipConfig) -> Result<()> {
     write_json(&config_path(), config)
 }

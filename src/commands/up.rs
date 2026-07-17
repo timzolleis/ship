@@ -92,12 +92,13 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
         blue(target.port)
     );
 
-    // Resolve dev command.
-    let Some(dev_cmd) = project_config.commands.dev.clone() else {
+    // Resolve dev command sequence.
+    let dev = project_config.commands.dev.clone();
+    let Some((last, rest)) = dev.split_last() else {
         println!("  {}", dim("No dev command configured. Proxy route is active."));
         return Ok(());
     };
-    let resolved_cmd = dev_cmd.replace("{port}", &target.port.to_string());
+    let resolved_last = last.replace("{port}", &target.port.to_string());
 
     // Open browser after a short delay, in the background.
     if open {
@@ -108,10 +109,17 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
         });
     }
 
-    println!("  {}", dim(format!("Running: {resolved_cmd}")));
+    // Run any preparatory dev commands to completion, in order.
+    for cmd in rest {
+        let resolved = cmd.replace("{port}", &target.port.to_string());
+        println!("  {}", dim(format!("Running: {resolved}")));
+        shell::exec_in_dir(&target.path, &resolved, &[])?;
+    }
+
+    println!("  {}", dim(format!("Running: {resolved_last}")));
     println!();
 
-    // Run the dev command (blocks until it exits).
-    shell::exec_in_dir(&target.path, &resolved_cmd, &[])?;
+    // Run the final dev command (blocks until it exits — the dev server).
+    shell::exec_in_dir(&target.path, &resolved_last, &[])?;
     Ok(())
 }

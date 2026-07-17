@@ -26,13 +26,11 @@ pub struct InitArgs {
     #[arg(long)]
     db_source: Option<String>,
     #[arg(long)]
-    install_cmd: Option<String>,
+    install_cmd: Vec<String>,
     #[arg(long)]
-    generate_cmd: Option<String>,
+    db_cmd: Vec<String>,
     #[arg(long)]
-    migrate_cmd: Option<String>,
-    #[arg(long)]
-    dev_cmd: Option<String>,
+    dev_cmd: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +125,47 @@ fn resolve(opt: Option<String>, msg: &str, default: &str) -> Result<String> {
         Some(v) => Ok(v),
         None => prompt::input(msg, Some(default)),
     }
+}
+
+// Collect an ordered command sequence for one scope. When `flag` is non-empty
+// it wins outright (skip prompting). Otherwise the first prompt defaults to the
+// existing sequence (or `defaults`), and we keep asking for the next command
+// until the user submits a blank line.
+fn prompt_scope(
+    flag: Vec<String>,
+    label: &str,
+    defaults: &[&str],
+    existing: &[String],
+) -> Result<Vec<String>> {
+    if !flag.is_empty() {
+        return Ok(flag);
+    }
+
+    // Seed prompts from the stored sequence, falling back to sensible defaults.
+    let seed: Vec<String> = if existing.is_empty() {
+        defaults.iter().map(|s| s.to_string()).collect()
+    } else {
+        existing.to_vec()
+    };
+
+    let mut cmds = Vec::new();
+    let mut i = 0;
+    loop {
+        let msg = if i == 0 {
+            format!("{label} command:")
+        } else {
+            format!("{label} command #{} (blank to finish):", i + 1)
+        };
+        let default = seed.get(i).map(|s| s.as_str());
+        // First entry is required-ish (has a default); later entries end on blank.
+        let value = prompt::input(&msg, default)?;
+        if value.trim().is_empty() {
+            break;
+        }
+        cmds.push(value);
+        i += 1;
+    }
+    Ok(cmds)
 }
 
 // ---------------------------------------------------------------------------
@@ -250,27 +289,26 @@ fn run_inner(opts: InitArgs) -> Result<()> {
     let db_user = resolve(opts.db_user, "Database user:", &inferred_db_user)?;
     let db_source = resolve(opts.db_source, "Source database to clone from:", &inferred_db_source)?;
 
-    // 5. Commands.
+    // 5. Command scopes — each an ordered sequence, blank line ends the scope.
     let existing_cmds = existing.as_ref().map(|e| e.commands.clone()).unwrap_or_default();
-    let install_cmd = resolve(
+    println!();
+    let install_cmds = prompt_scope(
         opts.install_cmd,
-        "Install command:",
-        existing_cmds.install.as_deref().unwrap_or("pnpm install"),
+        "Install",
+        &["pnpm install", "pnpm db generate"],
+        &existing_cmds.install,
     )?;
-    let generate_cmd = resolve(
-        opts.generate_cmd,
-        "Generate command (e.g. prisma):",
-        existing_cmds.generate.as_deref().unwrap_or("pnpm db generate"),
+    let db_cmds = prompt_scope(
+        opts.db_cmd,
+        "Database setup",
+        &["pnpm db migrate:deploy"],
+        &existing_cmds.db,
     )?;
-    let migrate_cmd = resolve(
-        opts.migrate_cmd,
-        "Migrate command:",
-        existing_cmds.migrate.as_deref().unwrap_or("pnpm db migrate:deploy"),
-    )?;
-    let dev_cmd = resolve(
+    let dev_cmds = prompt_scope(
         opts.dev_cmd,
-        "Dev command:",
-        existing_cmds.dev.as_deref().unwrap_or("pnpm dev -p {port}"),
+        "Dev",
+        &["pnpm dev -p {port}"],
+        &existing_cmds.dev,
     )?;
 
     // 6. Root checkout route — reuse domain/port if registered before.
@@ -312,11 +350,9 @@ fn run_inner(opts: InitArgs) -> Result<()> {
             port: inferred_db_port,
         },
         commands: CommandsConfig {
-            install: Some(install_cmd),
-            generate: Some(generate_cmd),
-            migrate: Some(migrate_cmd),
-            dev: Some(dev_cmd),
-            seed: existing.as_ref().and_then(|e| e.commands.seed.clone()),
+            install: install_cmds,
+            db: db_cmds,
+            dev: dev_cmds,
         },
         env: EnvConfig {
             files: env_files,

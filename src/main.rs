@@ -64,10 +64,7 @@ enum Cmd {
     /// Fetch, pull main, migrate source db
     Sync { project: String },
     /// Reset workspace database
-    Reset {
-        #[arg(long)]
-        fresh: bool,
-    },
+    Reset,
     /// Open editor, browser, or psql
     Open {
         first: Option<String>,
@@ -134,7 +131,7 @@ fn help_text() -> String {
 
   {utilities}
     {sync}   <project>              Fetch, pull main, migrate source db
-    {reset}  [--fresh]              Reset workspace database
+    {reset}                        Reset workspace database
     {open}   [editor|url|db]        Open editor, browser, or psql
     {index}  [project] [--all] [--dry-run]   Register pre-existing worktrees
     {gc}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces
@@ -210,7 +207,7 @@ fn dispatch(cmd: Cmd) {
             None => commands::db::print_help(),
         },
         Cmd::Sync { project } => commands::sync::run(project),
-        Cmd::Reset { fresh } => commands::reset::run(fresh),
+        Cmd::Reset => commands::reset::run(),
         Cmd::Open { first, second } => commands::open::run(first, second),
         Cmd::Index { project, all, dry_run } => commands::index::run(project, all, dry_run),
         Cmd::Gc { force, dry_run, sync } => commands::gc::run(force, dry_run, sync),

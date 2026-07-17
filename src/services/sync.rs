@@ -5,7 +5,7 @@ use crate::services::git;
 use crate::services::shell::{self, NON_INTERACTIVE_ENV};
 
 // Fast-forwards the project's base checkout, then (only when HEAD moved) runs
-// install/generate and — when the database is reachable (ping) — migrate.
+// the install scope and — when the database is reachable (ping) — the db scope.
 
 pub struct SyncResult {
     pub pulled: bool,
@@ -62,18 +62,17 @@ pub fn sync(pc: &ProjectConfig, base: Option<&str>) -> Result<SyncResult> {
     let mut migrated = false;
 
     if head_moved {
-        if let Some(cmd) = &pc.commands.install {
-            shell::exec_in_dir(repo, cmd, NON_INTERACTIVE_ENV)?;
+        if !pc.commands.install.is_empty() {
+            for cmd in &pc.commands.install {
+                shell::exec_in_dir(repo, cmd, NON_INTERACTIVE_ENV)?;
+            }
             installed = true;
         }
-        if let Some(cmd) = &pc.commands.generate {
-            shell::exec_in_dir(repo, cmd, NON_INTERACTIVE_ENV)?;
-        }
-        if let Some(cmd) = &pc.commands.migrate {
-            if database::ping(DbTarget::from(&pc.database)) {
+        if !pc.commands.db.is_empty() && database::ping(DbTarget::from(&pc.database)) {
+            for cmd in &pc.commands.db {
                 shell::exec_in_dir(repo, cmd, NON_INTERACTIVE_ENV)?;
-                migrated = true;
             }
+            migrated = true;
         }
     }
 

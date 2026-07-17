@@ -116,7 +116,7 @@ fn render_event(e: &StepEvent<ProvisionStep>, ctx: &RenderContext) -> Vec<String
             }
         }
         ProvisionStep::Install => vec![ok_line("Dependencies", "installed")],
-        ProvisionStep::Migrate => vec![ok_line("Migrations", "applied")],
+        ProvisionStep::Db => vec![ok_line("Database setup", "applied")],
         ProvisionStep::ProxyRoute => {
             let route = format!("https://{} → :{}", bold(&ctx.proxy_domain), blue(ctx.port));
             match e.status {

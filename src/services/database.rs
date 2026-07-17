@@ -28,12 +28,6 @@ fn db_err(op: &str, database: &str, e: Error) -> Error {
     }
 }
 
-pub fn create_db(t: DbTarget, db: &str) -> Result<()> {
-    runner::run(t.runtime, "createdb", &["-U", t.user, db])
-        .map(|_| ())
-        .map_err(|e| db_err("create", db, e))
-}
-
 pub fn drop_db(t: DbTarget, db: &str) -> Result<()> {
     runner::run(t.runtime, "dropdb", &["--if-exists", "-U", t.user, db])
         .map(|_| ())

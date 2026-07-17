@@ -35,10 +35,6 @@ pub struct EnvVarConfig {
 
 // ---------------------------------------------------------------------------
 // Database config
-//
-// Canonical shape carries `runtime`. Legacy stored configs carry a bare
-// `container` string (no `runtime`) — decode tolerates this and maps it to
-// Docker { container }. Encode ALWAYS writes canonical.
 // ---------------------------------------------------------------------------
 
 fn default_host() -> String {
@@ -49,43 +45,15 @@ fn default_db_port() -> u16 {
     5432
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     pub runtime: ExecutionRuntime,
     pub user: String,
     pub source: String,
-    pub host: String,
-    pub port: u16,
-}
-
-#[derive(Deserialize)]
-struct DatabaseConfigRaw {
-    runtime: Option<ExecutionRuntime>,
-    container: Option<String>,
-    user: String,
-    source: String,
     #[serde(default = "default_host")]
-    host: String,
+    pub host: String,
     #[serde(default = "default_db_port")]
-    port: u16,
-}
-
-impl<'de> Deserialize<'de> for DatabaseConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = DatabaseConfigRaw::deserialize(d)?;
-        let runtime = match (raw.runtime, raw.container) {
-            (Some(rt), _) => rt,
-            (None, Some(container)) => ExecutionRuntime::Docker { container },
-            (None, None) => return Err(serde::de::Error::missing_field("runtime")),
-        };
-        Ok(DatabaseConfig {
-            runtime,
-            user: raw.user,
-            source: raw.source,
-            host: raw.host,
-            port: raw.port,
-        })
-    }
+    pub port: u16,
 }
 
 impl DatabaseConfig {
@@ -104,16 +72,12 @@ impl DatabaseConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandsConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub install: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generate: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub migrate: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub install: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub db: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dev: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

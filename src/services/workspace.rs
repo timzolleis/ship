@@ -45,8 +45,7 @@ pub enum ProvisionStep {
     Database,
     Env,
     Install,
-    Generate,
-    Migrate,
+    Db,
     ProxyRoute,
 }
 
@@ -63,10 +62,16 @@ pub enum TeardownStep {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ResetStep {
     Drop,
-    Create,
     Clone,
-    Migrate,
-    Seed,
+    Db,
+}
+
+// Run every command in a scope, in order, in `dir`. Non-interactive env.
+fn run_scope(dir: &str, cmds: &[String]) -> Result<()> {
+    for cmd in cmds {
+        shell::exec_in_dir(dir, cmd, NON_INTERACTIVE_ENV)?;
+    }
+    Ok(())
 }
 
 pub struct ProvisionInput<'a> {
@@ -262,18 +267,14 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         Some(format!("{change_count} changes")),
     ));
 
-    // 8e. install / generate / migrate (only when configured).
-    if let Some(cmd) = &pc.commands.install {
-        shell::exec_in_dir(&worktree_dir, cmd, NON_INTERACTIVE_ENV)?;
+    // 8e. install / db scopes (only when configured).
+    if !pc.commands.install.is_empty() {
+        run_scope(&worktree_dir, &pc.commands.install)?;
         events.push(step(ProvisionStep::Install, Status::Done, None));
     }
-    if let Some(cmd) = &pc.commands.generate {
-        shell::exec_in_dir(&worktree_dir, cmd, NON_INTERACTIVE_ENV)?;
-        events.push(step(ProvisionStep::Generate, Status::Done, None));
-    }
-    if let Some(cmd) = &pc.commands.migrate {
-        shell::exec_in_dir(&worktree_dir, cmd, NON_INTERACTIVE_ENV)?;
-        events.push(step(ProvisionStep::Migrate, Status::Done, None));
+    if !pc.commands.db.is_empty() {
+        run_scope(&worktree_dir, &pc.commands.db)?;
+        events.push(step(ProvisionStep::Db, Status::Done, None));
     }
 
     // 8f. proxy-route.
@@ -362,35 +363,19 @@ pub fn teardown(
 
 // -- reset -------------------------------------------------------------------
 
-pub fn reset_database(
-    ws: &Workspace,
-    pc: &ProjectConfig,
-    fresh: bool,
-) -> Result<Vec<StepEvent<ResetStep>>> {
+pub fn reset_database(ws: &Workspace, pc: &ProjectConfig) -> Result<Vec<StepEvent<ResetStep>>> {
     let mut events = Vec::new();
     let target = DbTarget::from(&pc.database);
 
     database::drop_db(target, &ws.db_name)?;
     events.push(step(ResetStep::Drop, Status::Done, None));
 
-    if fresh {
-        database::create_db(target, &ws.db_name)?;
-        events.push(step(ResetStep::Create, Status::Done, None));
-    } else {
-        database::clone_db(target, &pc.database.source, &ws.db_name)?;
-        events.push(step(ResetStep::Clone, Status::Done, None));
-    }
+    database::clone_db(target, &pc.database.source, &ws.db_name)?;
+    events.push(step(ResetStep::Clone, Status::Done, None));
 
-    if let Some(cmd) = &pc.commands.migrate {
+    for cmd in &pc.commands.db {
         shell::exec_in_dir(&ws.path, cmd, NON_INTERACTIVE_ENV)?;
-        events.push(step(ResetStep::Migrate, Status::Done, None));
-    }
-
-    if fresh {
-        if let Some(cmd) = &pc.commands.seed {
-            shell::exec_in_dir(&ws.path, cmd, NON_INTERACTIVE_ENV)?;
-            events.push(step(ResetStep::Seed, Status::Done, None));
-        }
+        events.push(step(ResetStep::Db, Status::Done, Some(cmd.clone())));
     }
 
     Ok(events)

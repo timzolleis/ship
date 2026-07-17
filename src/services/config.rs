@@ -51,41 +51,16 @@ fn write_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
     })
 }
 
-// A stored config is "legacy" when any project's `database` carries a bare
-// `container` string and no `runtime` key. The schema decode tolerates this,
-// so we inspect the raw JSON to decide whether a canonical write-back is owed.
-fn is_legacy_raw(raw: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return false;
-    };
-    v.get("projects")
-        .and_then(|p| p.as_object())
-        .map(|projects| {
-            projects.values().any(|p| {
-                p.get("database")
-                    .and_then(|d| d.as_object())
-                    .map(|db| db.contains_key("container") && !db.contains_key("runtime"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Self-migrating load: if the stored raw was the legacy database shape,
-/// re-encode canonical and write back best-effort. Load still succeeds even
-/// if the write-back fails.
+/// Load the ship config. A parse failure means the stored file predates the
+/// current schema — surface a friendly "re-run ship init" hint rather than
+/// raw serde noise.
 pub fn load_config() -> Result<ShipConfig> {
     let Some(raw) = read_raw(&config_path())? else {
         return Ok(ShipConfig::default());
     };
-    let config: ShipConfig = serde_json::from_str(&raw).map_err(|e| Error::ParseConfig {
-        file: config_path().display().to_string(),
+    serde_json::from_str(&raw).map_err(|e| Error::ConfigOutdated {
         detail: e.to_string(),
-    })?;
-    if is_legacy_raw(&raw) {
-        let _ = save_config(&config);
-    }
-    Ok(config)
+    })
 }
 
 pub fn save_config(config: &ShipConfig) -> Result<()> {

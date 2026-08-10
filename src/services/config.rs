@@ -14,8 +14,14 @@ pub fn config_dir() -> PathBuf {
     Path::new(&home_dir()).join(".config").join("ship")
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
+}
+
+/// Raw config text, for reporting on-disk line numbers. Reading the file (not
+/// re-serializing) keeps the numbers true after a hand edit.
+pub fn read_config_raw() -> Result<Option<String>> {
+    read_raw(&config_path())
 }
 
 fn workspaces_path() -> PathBuf {

@@ -9,6 +9,7 @@ mod util;
 mod version;
 
 use clap::{Parser, Subcommand};
+use commands::config::ConfigCmd;
 use commands::db::DbCmd;
 use commands::init::InitArgs;
 use commands::proxy::ProxyCmd;
@@ -27,6 +28,11 @@ enum Cmd {
     Init(InitArgs),
     /// List registered projects
     Projects,
+    /// Inspect stored project config
+    Config {
+        #[command(subcommand)]
+        cmd: Option<ConfigCmd>,
+    },
     /// Create or resume a workspace
     Create {
         project: Option<String>,
@@ -106,6 +112,7 @@ fn help_text() -> String {
     {init}                          Register current directory as a project
     {init} --alias ep ...           Non-interactive with flags
     {projects}                      List registered projects
+    {config_show} [alias] [--all]   Show stored config with file path + lines
 
   {lifecycle}
     {create} [project] [branch]     Create or resume a workspace
@@ -154,6 +161,7 @@ fn help_text() -> String {
         project_setup = bold("Project Setup"),
         init = blue("init"),
         projects = blue("projects"),
+        config_show = blue("config show"),
         lifecycle = bold("Workspace Lifecycle"),
         create = blue("create"),
         down = blue("down"),
@@ -195,6 +203,7 @@ fn dispatch(cmd: Cmd) {
     match cmd {
         Cmd::Init(args) => commands::init::run(args),
         Cmd::Projects => commands::projects::run(),
+        Cmd::Config { cmd } => commands::config::run(cmd),
         Cmd::Create { project, branch, base } => commands::create::run(project, branch, base),
         Cmd::Down { project, branch, force, db_only } => {
             commands::down::run(project, branch, force, db_only)

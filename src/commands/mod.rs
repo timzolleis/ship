@@ -1,3 +1,4 @@
+pub mod config;
 pub mod create;
 pub mod db;
 pub mod down;

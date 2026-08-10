@@ -37,6 +37,7 @@ src/
 │   ├── git.rs           # Worktree/branch ops over shell
 │   ├── database.rs      # Postgres CLI ops (createdb/dropdb/psql/pg_dump) over runner
 │   ├── config.rs        # ~/.config/ship/ config + workspace registry (self-migrating load)
+│   ├── copy.rs          # Copies gitignored local state into a new worktree
 │   ├── proxy.rs         # Caddy reverse proxy via docker
 │   ├── editor.rs        # Detect & open editors ($VISUAL/$EDITOR → GUI apps → terminal)
 │   ├── env.rs           # .env file copying/patching (delegates rewriting to domain)
@@ -52,7 +53,9 @@ src/
 - **Layering**: commands → services → domain. Domain modules are pure (no IO); services do IO through `shell`/`runner`; commands only render and prompt. Don't shell out from commands directly.
 - **Errors**: one `Error` variant per failure mode in `src/errors.rs`, with the user-facing message in `#[error(...)]`. Commands catch at their boundary and print (`eprintln!("\n  {} {}\n", red("Error:"), e)` or command-specific formats) — they don't propagate to `main`.
 - **Nonzero exits**: `shell::exec` (captured) fails on nonzero exit; `exec_interactive`/`exec_in_dir` (inherited stdio) deliberately do NOT — only spawn failures error. A failing dev server must not fail `ship up`.
-- **Formatting**: import from `src/fmt.rs`. Never define local ANSI helpers. Pad columns BEFORE colorizing (ANSI codes break format widths).
+- **Formatting**: import from `src/fmt.rs`. Never define local ANSI helpers. Pad columns BEFORE colorizing (ANSI codes break format widths). Color is dropped automatically when stdout isn't a TTY or `NO_COLOR` is set.
+- **Env rewriting**: `env.files` maps each .env path to its own vars, because one name needs different handling per package (shared postgres `DATABASE_URL` gets rewritten, a worktree-relative sqlite one is `plain`). The pre-per-file flat `autoDetected` shape still decodes by fanning every var out to every file. `ship config show` reports the stored handling with on-disk line numbers.
+- **Workspace state has three sources**: tracked files come from the git checkout, postgres from `database::clone_db`, and file-backed state (sqlite, certs, fixtures) from `copy::copy_paths` over the project's `copy` list. `init` proposes copy paths only when git ignores them — tracked files already arrive with the checkout.
 - **Prompts**: through `src/prompt.rs` only (it strips trailing `:` — dialoguer adds its own).
 - **Editor opening**: always `editor::open()`, never exec an editor directly.
 - **Config JSON**: camelCase keys, 2-space pretty print, trailing newline. `IndexMap` preserves key order. Legacy `database.container` shape is decoded and canonically written back on load — keep that tolerance.

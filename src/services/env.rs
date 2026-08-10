@@ -20,7 +20,7 @@ pub fn patch_env_files(
 ) -> Result<Vec<PatchResult>> {
     let mut results = Vec::new();
 
-    for file in &env.files {
+    for (file, vars) in &env.files {
         let source_path = Path::new(source_dir).join(file);
         let target_path = Path::new(target_dir).join(file);
 
@@ -33,7 +33,7 @@ pub fn patch_env_files(
             detail: e.to_string(),
         })?;
 
-        let patched = patch_env_content(&content, env, ctx);
+        let patched = patch_env_content(&content, vars, ctx);
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).map_err(|e| Error::CreateDirectory {

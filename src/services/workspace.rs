@@ -6,6 +6,7 @@ use crate::services::database::{self, DbTarget};
 use crate::services::env::{self, PatchResult};
 use crate::services::shell::{self, NON_INTERACTIVE_ENV};
 use crate::services::sync::{self, SyncResult};
+use crate::services::copy::{self, CopyOutcome, CopyStatus};
 use crate::services::{claude, config, git, proxy};
 use crate::util::resolve_path;
 
@@ -36,6 +37,61 @@ fn step<S: Copy>(s: S, status: Status, detail: Option<String>) -> StepEvent<S> {
     }
 }
 
+// A path that vanished (a teammate's local certs) must not fail the whole
+// create — it degrades to a warning line.
+fn copy_status(outcomes: &[CopyOutcome]) -> Status {
+    if outcomes.iter().any(|o| {
+        matches!(
+            o.status,
+            CopyStatus::MissingSource | CopyStatus::OutsideProject
+        )
+    }) {
+        Status::Warning
+    } else if outcomes
+        .iter()
+        .all(|o| matches!(o.status, CopyStatus::SkippedExisting))
+    {
+        Status::SkippedExisting
+    } else {
+        Status::Done
+    }
+}
+
+fn copy_detail(outcomes: &[CopyOutcome]) -> String {
+    let mut copied = 0;
+    let mut bytes = 0;
+    let mut skipped = 0;
+    let mut problems = Vec::new();
+
+    for o in outcomes {
+        match &o.status {
+            CopyStatus::Copied { files, bytes: b } => {
+                copied += files;
+                bytes += b;
+            }
+            CopyStatus::SkippedExisting => skipped += 1,
+            CopyStatus::MissingSource => problems.push(format!("{} not found", o.path)),
+            CopyStatus::OutsideProject => {
+                problems.push(format!("{} is outside the project", o.path))
+            }
+        }
+    }
+
+    let mut parts = Vec::new();
+    if copied > 0 {
+        parts.push(format!(
+            "{copied} file{} ({})",
+            crate::util::plural(copied),
+            copy::human_size(bytes)
+        ));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} already present"));
+    }
+    parts.extend(problems);
+    parts.join(", ")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProvisionStep {
     Probe,
@@ -43,6 +99,7 @@ pub enum ProvisionStep {
     SyncBase,
     Worktree,
     Database,
+    Copy,
     Env,
     Install,
     Db,
@@ -249,7 +306,17 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         events.push(step(ProvisionStep::Database, Status::Done, None));
     }
 
-    // 8d. env.
+    // 8d. copy local state. Before install/db so migrations and seeds see it.
+    if !pc.copy.is_empty() {
+        let outcomes = copy::copy_paths(&pc.path, &worktree_dir, &pc.copy)?;
+        events.push(step(
+            ProvisionStep::Copy,
+            copy_status(&outcomes),
+            Some(copy_detail(&outcomes)),
+        ));
+    }
+
+    // 8e. env.
     let env_changes = env::patch_env_files(
         &pc.path,
         &worktree_dir,
@@ -267,7 +334,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         Some(format!("{change_count} changes")),
     ));
 
-    // 8e. install / db scopes (only when configured).
+    // 8f. install / db scopes (only when configured).
     if !pc.commands.install.is_empty() {
         run_scope(&worktree_dir, &pc.commands.install)?;
         events.push(step(ProvisionStep::Install, Status::Done, None));
@@ -277,7 +344,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         events.push(step(ProvisionStep::Db, Status::Done, None));
     }
 
-    // 8f. proxy-route.
+    // 8g. proxy-route.
     if existing_route.is_some() {
         events.push(step(ProvisionStep::ProxyRoute, Status::SkippedExisting, None));
     } else {

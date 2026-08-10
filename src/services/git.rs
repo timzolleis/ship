@@ -37,6 +37,23 @@ pub fn worktree_add(repo: &str, path: &str, branch: &str, base: Option<&str>) ->
     Ok(())
 }
 
+/// Subset of `paths` that git ignores. One call — `check-ignore` prints the
+/// ignored ones and exits nonzero when there are none, so an Err (including
+/// "not a git repo") means nothing is ignored.
+pub fn ignored_paths(repo: &str, paths: &[String]) -> Vec<String> {
+    let mut args = vec!["check-ignore"];
+    args.extend(paths.iter().map(|p| p.as_str()));
+    match run(repo, &args) {
+        Ok(r) => r
+            .stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 pub fn worktree_remove(repo: &str, path: &str, force: bool) -> Result<()> {
     let mut args = vec!["worktree", "remove"];
     if force {

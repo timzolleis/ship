@@ -2,14 +2,15 @@ use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green};
 use crate::prompt;
 use crate::schema::{
-    CommandsConfig, DatabaseConfig, EnvConfig, EnvVarConfig, EnvVarType, ExecutionRuntime,
-    ProjectConfig, ShipConfig, WorktreeConfig,
+    CommandsConfig, DatabaseConfig, EnvConfig, EnvFileVars, EnvVarConfig, EnvVarType,
+    ExecutionRuntime, ProjectConfig, ShipConfig, WorktreeConfig,
 };
-use crate::services::{config, proxy};
+use crate::services::{config, copy, git, proxy};
 use crate::util::cwd_string;
 use indexmap::IndexMap;
 use regex::Regex;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -38,6 +39,11 @@ pub struct InitArgs {
 // ---------------------------------------------------------------------------
 
 const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", ".next", ".cache", ".turbo"];
+
+// Local state a git checkout can't carry. Deliberately narrow: uploads/ and
+// storage/ are plausible but easily multi-GB, and a silent huge copy on every
+// `ship create` is worse than adding the path by hand once.
+const STATE_EXTENSIONS: &[&str] = &["db", "sqlite", "sqlite3", "pem", "key", "crt"];
 
 static ENV_LINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([A-Z_]+)=(.+)$").unwrap());
 static DATABASE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -124,6 +130,230 @@ fn resolve(opt: Option<String>, msg: &str, default: &str) -> Result<String> {
     match opt {
         Some(v) => Ok(v),
         None => prompt::input(msg, Some(default)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Copy-path detection
+// ---------------------------------------------------------------------------
+
+fn find_state_files(dir: &Path, root: &Path, results: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if EXCLUDED_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        let full = entry.path();
+        let Ok(meta) = fs::metadata(&full) else { continue };
+        if meta.is_dir() {
+            find_state_files(&full, root, results);
+        } else if full
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| STATE_EXTENSIONS.contains(&e))
+        {
+            if let Ok(rel) = full.strip_prefix(root) {
+                results.push(rel.display().to_string());
+            }
+        }
+    }
+}
+
+/// Gitignored local state worth copying into a worktree. Tracked files already
+/// arrive with the checkout, so "git ignores it" is the whole signal.
+///
+/// A match is proposed as its containing directory when that directory is
+/// itself ignored — copying `database.db` without its `-wal`/`-shm` siblings
+/// can hand the app a torn read.
+fn detect_copy_paths(root: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    find_state_files(root, root, &mut files);
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let repo = root.display().to_string();
+    let parents: Vec<String> = files
+        .iter()
+        .filter_map(|f| Path::new(f).parent())
+        .map(|p| p.display().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let ignored_dirs = git::ignored_paths(&repo, &parents);
+
+    let mut candidates: Vec<String> = Vec::new();
+    for file in &files {
+        let parent = Path::new(file)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let candidate = if !parent.is_empty() && ignored_dirs.contains(&parent) {
+            parent
+        } else {
+            file.clone()
+        };
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    let ignored = git::ignored_paths(&repo, &candidates);
+    candidates.retain(|c| ignored.contains(c));
+    candidates
+}
+
+// Checkbox list. Everything detected starts checked on a first init; once the
+// project has a stored list, only stored paths start checked — so a path you
+// deselected stays deselected instead of silently coming back.
+fn review_copy_paths(root: &str, detected: Vec<String>, stored: &[String]) -> Result<Vec<String>> {
+    let mut paths = stored.to_vec();
+    for d in detected {
+        if !paths.contains(&d) {
+            paths.push(d);
+        }
+    }
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let first_run = stored.is_empty();
+    let items: Vec<(String, bool)> = paths
+        .iter()
+        .map(|p| {
+            let (files, bytes) = copy::measure(root, p);
+            let label = format!(
+                "{p}  ({} file{}, {})",
+                files,
+                crate::util::plural(files),
+                copy::human_size(bytes)
+            );
+            (label, first_run || stored.contains(p))
+        })
+        .collect();
+
+    println!();
+    if !std::io::stdin().is_terminal() {
+        for (label, checked) in &items {
+            if *checked {
+                println!("    {} {}", green("✓"), dim(label));
+            }
+        }
+        return Ok(paths
+            .into_iter()
+            .zip(items)
+            .filter(|(_, (_, checked))| *checked)
+            .map(|(p, _)| p)
+            .collect());
+    }
+
+    let picked = prompt::multi_select("Copy into new workspaces? (space toggles)", &items)?;
+    Ok(picked.into_iter().map(|i| paths[i].clone()).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Env review
+// ---------------------------------------------------------------------------
+
+/// Current on-disk values, file → var → value. Display only; a configured var
+/// whose file no longer holds it simply has no entry.
+type EnvValues = IndexMap<String, IndexMap<String, String>>;
+
+fn truncate(value: &str, max: usize) -> String {
+    let short: String = value.chars().take(max).collect();
+    if value.chars().count() > max {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+fn print_env_table(files: &IndexMap<String, EnvFileVars>, values: &EnvValues) {
+    let key_width = files
+        .values()
+        .flat_map(|vars| vars.keys())
+        .map(|k| k.len())
+        .max()
+        .unwrap_or(0);
+
+    for (file, vars) in files {
+        println!("    {}", blue(file));
+        for (key, cfg) in vars {
+            let value = values
+                .get(file)
+                .and_then(|v| v.get(key))
+                .map(|v| truncate(v, 44))
+                .unwrap_or_else(|| "(not present)".to_string());
+            println!(
+                "      {key:<key_width$}  {}  {}",
+                dim(format!("{:<45}", truncate(&value, 45))),
+                green(cfg.var_type.label())
+            );
+        }
+    }
+}
+
+// Confirm-then-fix: detection proposes, enter accepts, and only the wrong rows
+// cost keystrokes. Skipped without a TTY so scripted `ship init` still works.
+fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues) -> Result<()> {
+    if files.is_empty() || !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+
+    loop {
+        println!();
+        if !prompt::confirm("Change how any of these are handled?", false)? {
+            return Ok(());
+        }
+
+        // Flat row list so picking a var is one selection, not file-then-var.
+        let rows: Vec<(String, String)> = files
+            .iter()
+            .flat_map(|(file, vars)| vars.keys().map(|k| (file.clone(), k.clone())))
+            .collect();
+        let mut items: Vec<String> = rows
+            .iter()
+            .map(|(file, key)| {
+                let label = files[file][key].var_type.label();
+                format!("{file}  {key}  ({label})")
+            })
+            .collect();
+        items.push("Done".to_string());
+
+        let picked = prompt::select("Which variable?", &items)?;
+        let Some((file, key)) = rows.get(picked) else {
+            return Ok(());
+        };
+
+        let current = files[file][key].var_type;
+        // Current handling first so enter keeps it (prompt::select defaults to 0).
+        let choices: Vec<EnvVarType> = std::iter::once(current)
+            .chain(EnvVarType::ALL.into_iter().filter(|t| *t != current))
+            .collect();
+        let labels: Vec<String> = choices
+            .iter()
+            .map(|t| format!("{:<24} {}", t.label(), t.help()))
+            .collect();
+        let chosen = choices[prompt::select(&format!("Handling for {key}"), &labels)?];
+
+        let path = if chosen == EnvVarType::DevUrl {
+            let existing_path = files[file][key].path.clone().unwrap_or_default();
+            let entered = prompt::input_optional(
+                "Path after the port (e.g. /api/auth/callback):",
+                Some(&existing_path),
+            )?;
+            Some(entered).filter(|p| !p.is_empty())
+        } else {
+            None
+        };
+
+        files[file][key] = EnvVarConfig {
+            var_type: chosen,
+            path,
+        };
+
+        println!();
+        print_env_table(files, values);
     }
 }
 
@@ -247,25 +477,25 @@ fn run_inner(opts: InitArgs) -> Result<()> {
         .as_ref()
         .map(|e| e.database.source.clone())
         .unwrap_or_else(|| "postgres".to_string());
-    let mut all_env_files: Vec<String> = Vec::new();
-    let mut all_detected_vars: IndexMap<String, EnvVarConfig> = IndexMap::new();
+    let mut detected_files: IndexMap<String, EnvFileVars> = IndexMap::new();
+    let mut env_values: EnvValues = IndexMap::new();
 
     for env in &detected {
-        println!("    Found {}", blue(&env.file));
-        all_env_files.push(env.file.clone());
+        let mut vars: EnvFileVars = IndexMap::new();
+        let mut file_values: IndexMap<String, String> = IndexMap::new();
 
         for (key, value, var_type) in &env.vars {
-            let preview: String = value.chars().take(60).collect();
-            let ellipsis = if value.len() > 60 { "..." } else { "" };
-            println!("      {} → {}{}", dim(key), dim(&preview), ellipsis);
-            all_detected_vars.insert(
+            vars.insert(
                 key.clone(),
                 EnvVarConfig {
                     var_type: *var_type,
                     path: None,
                 },
             );
+            file_values.insert(key.clone(), value.clone());
 
+            // A sqlite/file: URL parses to None, so a local DATABASE_URL never
+            // clobbers the postgres connection details.
             if *var_type == EnvVarType::DatabaseUrl && key == "DATABASE_URL" {
                 if let Some(parsed) = parse_database_url(value) {
                     inferred_db_user = parsed.user;
@@ -275,7 +505,41 @@ fn run_inner(opts: InitArgs) -> Result<()> {
                 }
             }
         }
+
+        detected_files.insert(env.file.clone(), vars);
+        env_values.insert(env.file.clone(), file_values);
     }
+
+    // Stored choices win over fresh detection — a var you moved to "leave
+    // untouched" must not flip back on the next init.
+    let mut env_files = detected_files;
+    if let Some(e) = &existing {
+        for (file, vars) in &e.env.files {
+            let entry = env_files.entry(file.clone()).or_default();
+            for (key, cfg) in vars {
+                entry.insert(key.clone(), cfg.clone());
+            }
+        }
+    }
+
+    if env_files.is_empty() {
+        println!("    {}", dim("No .env files with recognized variables."));
+    } else {
+        print_env_table(&env_files, &env_values);
+        review_env_vars(&mut env_files, &env_values)?;
+    }
+
+    // 3b. Local state to copy into each worktree.
+    println!();
+    println!("  Scanning for local state files...");
+    let detected_copy = detect_copy_paths(Path::new(&cwd));
+    let stored_copy = existing.as_ref().map(|e| e.copy.clone()).unwrap_or_default();
+    let copy_paths = if detected_copy.is_empty() && stored_copy.is_empty() {
+        println!("    {}", dim("None found."));
+        Vec::new()
+    } else {
+        review_copy_paths(&cwd, detected_copy, &stored_copy)?
+    };
 
     if !detected.is_empty() {
         println!();
@@ -332,21 +596,7 @@ fn run_inner(opts: InitArgs) -> Result<()> {
         None => proxy::next_port()?,
     };
 
-    // 7. Build the config — merge env with existing (manual tweaks like dev_url
-    // paths win over fresh detection), keep customized worktree patterns.
-    let mut env_files: Vec<String> = existing.as_ref().map(|e| e.env.files.clone()).unwrap_or_default();
-    for f in all_env_files {
-        if !env_files.contains(&f) {
-            env_files.push(f);
-        }
-    }
-    let mut auto_detected = all_detected_vars;
-    if let Some(e) = &existing {
-        for (k, v) in &e.env.auto_detected {
-            auto_detected.insert(k.clone(), v.clone());
-        }
-    }
-
+    // 7. Build the config — keep customized worktree patterns.
     let project = ProjectConfig {
         path: project_path,
         domain: Some(root_domain.clone()),
@@ -365,10 +615,8 @@ fn run_inner(opts: InitArgs) -> Result<()> {
             db: db_cmds,
             dev: dev_cmds,
         },
-        env: EnvConfig {
-            files: env_files,
-            auto_detected,
-        },
+        env: EnvConfig { files: env_files },
+        copy: copy_paths,
         worktree: existing
             .as_ref()
             .map(|e| e.worktree.clone())

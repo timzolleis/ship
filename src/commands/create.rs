@@ -115,6 +115,14 @@ fn render_event(e: &StepEvent<ProvisionStep>, ctx: &RenderContext) -> Vec<String
                 )]
             }
         }
+        ProvisionStep::Copy => {
+            let detail = e.detail.as_deref().unwrap_or("");
+            match e.status {
+                Status::Warning => vec![warn_line("Local files", detail)],
+                Status::SkippedExisting => vec![skip_line("Local files", "")],
+                Status::Done => vec![ok_line("Local files", &dim(detail))],
+            }
+        }
         ProvisionStep::Install => vec![ok_line("Dependencies", "installed")],
         ProvisionStep::Db => vec![ok_line("Database setup", "applied")],
         ProvisionStep::ProxyRoute => {

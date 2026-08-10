@@ -34,6 +34,15 @@ pub fn confirm(msg: &str, default: bool) -> Result<bool> {
         .interact()?)
 }
 
+/// Checkbox list. `items` carries each label with its initial checked state;
+/// the result is the indices left checked.
+pub fn multi_select(msg: &str, items: &[(String, bool)]) -> Result<Vec<usize>> {
+    Ok(dialoguer::MultiSelect::new()
+        .with_prompt(clean(msg))
+        .items_checked(items)
+        .interact()?)
+}
+
 pub fn select(msg: &str, items: &[String]) -> Result<usize> {
     Ok(dialoguer::Select::new()
         .with_prompt(clean(msg))

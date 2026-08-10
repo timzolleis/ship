@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod config;
+pub mod copy;
 pub mod database;
 pub mod editor;
 pub mod env;

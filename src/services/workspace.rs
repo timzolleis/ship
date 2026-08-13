@@ -2,13 +2,14 @@ use crate::domain::env_patch::EnvPatchContext;
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
 use crate::schema::{ExecutionRuntime, ProjectConfig, Workspace};
+use crate::services::copy::{self, CopyOutcome, CopyStatus};
 use crate::services::database::{self, DbTarget};
 use crate::services::env::{self, PatchResult};
 use crate::services::shell::{self, NON_INTERACTIVE_ENV};
 use crate::services::sync::{self, SyncResult};
-use crate::services::copy::{self, CopyOutcome, CopyStatus};
 use crate::services::{claude, config, git, proxy};
 use crate::util::resolve_path;
+use std::sync::mpsc;
 
 // The deep orchestrator. The provisioning state machine
 // (probe → resume-from-any-partial-state → execute) lives here, off the
@@ -346,7 +347,11 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
 
     // 8g. proxy-route.
     if existing_route.is_some() {
-        events.push(step(ProvisionStep::ProxyRoute, Status::SkippedExisting, None));
+        events.push(step(
+            ProvisionStep::ProxyRoute,
+            Status::SkippedExisting,
+            None,
+        ));
     } else {
         match proxy::add_route(&names.proxy_domain, port) {
             Ok(()) => events.push(step(ProvisionStep::ProxyRoute, Status::Done, None)),
@@ -368,20 +373,65 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
 
 // -- teardown (never fails; warnings as events) -------------------------------
 
+/// The steps `teardown` will run, in order — a caller can draw the checklist
+/// before the work starts. Keep in lockstep with `teardown_each`.
+pub fn teardown_steps(opts: &TeardownOptions) -> Vec<TeardownStep> {
+    let mut steps = vec![TeardownStep::ProxyRoute, TeardownStep::Database];
+    if opts.remove_worktree {
+        steps.push(TeardownStep::Worktree);
+        steps.push(TeardownStep::Branch);
+        if opts.delete_remote_branch {
+            steps.push(TeardownStep::RemoteBranch);
+        }
+        steps.push(TeardownStep::ClaudeConvos);
+    }
+    steps
+}
+
 pub fn teardown(
     ws: &Workspace,
     pc: &ProjectConfig,
     opts: &TeardownOptions,
 ) -> Vec<StepEvent<TeardownStep>> {
     let mut events = Vec::new();
+    teardown_each(ws, pc, opts, |e| events.push(e));
+    events
+}
+
+/// Teardown on a worker thread, one event per finished step. The caller keeps
+/// its terminal free to animate while `git` and `dropdb` run.
+pub fn teardown_stream(
+    ws: Workspace,
+    pc: ProjectConfig,
+    opts: TeardownOptions,
+) -> mpsc::Receiver<StepEvent<TeardownStep>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        teardown_each(&ws, &pc, &opts, |e| {
+            let _ = tx.send(e);
+        })
+    });
+    rx
+}
+
+fn teardown_each(
+    ws: &Workspace,
+    pc: &ProjectConfig,
+    opts: &TeardownOptions,
+    mut emit: impl FnMut(StepEvent<TeardownStep>),
+) {
     let target = DbTarget::from(&pc.database);
 
-    events.push(match proxy::remove_route(&ws.proxy_domain) {
+    emit(match proxy::remove_route(&ws.proxy_domain) {
         Ok(()) => step(TeardownStep::ProxyRoute, Status::Done, None),
-        Err(e) => step(TeardownStep::ProxyRoute, Status::Warning, Some(e.to_string())),
+        Err(e) => step(
+            TeardownStep::ProxyRoute,
+            Status::Warning,
+            Some(e.to_string()),
+        ),
     });
 
-    events.push(match database::drop_db(target, &ws.db_name) {
+    emit(match database::drop_db(target, &ws.db_name) {
         Ok(()) => step(TeardownStep::Database, Status::Done, None),
         Err(e) => step(TeardownStep::Database, Status::Warning, Some(e.to_string())),
     });
@@ -390,7 +440,7 @@ pub fn teardown(
         // git remove, with a filesystem force-remove fallback: if `git worktree
         // remove` refuses — e.g. uncommitted changes without --force, or corrupt
         // metadata — still clear the dir from disk so no orphan is left behind.
-        events.push(match git::worktree_remove(&pc.path, &ws.path, opts.force) {
+        emit(match git::worktree_remove(&pc.path, &ws.path, opts.force) {
             Ok(()) => step(TeardownStep::Worktree, Status::Done, None),
             Err(_) => match std::fs::remove_dir_all(&ws.path) {
                 Ok(()) => step(
@@ -402,13 +452,13 @@ pub fn teardown(
             },
         });
 
-        events.push(match git::delete_branch(&pc.path, &ws.branch) {
+        emit(match git::delete_branch(&pc.path, &ws.branch) {
             Ok(()) => step(TeardownStep::Branch, Status::Done, None),
             Err(e) => step(TeardownStep::Branch, Status::Warning, Some(e.to_string())),
         });
 
         if opts.delete_remote_branch {
-            events.push(match git::delete_remote_branch(&pc.path, &ws.branch) {
+            emit(match git::delete_remote_branch(&pc.path, &ws.branch) {
                 Ok(()) => step(TeardownStep::RemoteBranch, Status::Done, None),
                 Err(e) => step(
                     TeardownStep::RemoteBranch,
@@ -418,14 +468,12 @@ pub fn teardown(
             });
         }
 
-        events.push(if claude::remove_project_convo(&ws.path) {
+        emit(if claude::remove_project_convo(&ws.path) {
             step(TeardownStep::ClaudeConvos, Status::Done, None)
         } else {
             step(TeardownStep::ClaudeConvos, Status::SkippedExisting, None)
         });
     }
-
-    events
 }
 
 // -- reset -------------------------------------------------------------------

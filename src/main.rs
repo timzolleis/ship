@@ -5,6 +5,7 @@ mod fmt;
 mod prompt;
 mod schema;
 mod services;
+mod ui;
 mod util;
 mod version;
 
@@ -204,10 +205,17 @@ fn dispatch(cmd: Cmd) {
         Cmd::Init(args) => commands::init::run(args),
         Cmd::Projects => commands::projects::run(),
         Cmd::Config { cmd } => commands::config::run(cmd),
-        Cmd::Create { project, branch, base } => commands::create::run(project, branch, base),
-        Cmd::Down { project, branch, force, db_only } => {
-            commands::down::run(project, branch, force, db_only)
-        }
+        Cmd::Create {
+            project,
+            branch,
+            base,
+        } => commands::create::run(project, branch, base),
+        Cmd::Down {
+            project,
+            branch,
+            force,
+            db_only,
+        } => commands::down::run(project, branch, force, db_only),
         Cmd::Ls { project } => commands::list::run(project),
         Cmd::Up { open } => commands::up::run(open),
         Cmd::Proxy { cmd } => commands::proxy::run(cmd),
@@ -218,8 +226,16 @@ fn dispatch(cmd: Cmd) {
         Cmd::Sync { project } => commands::sync::run(project),
         Cmd::Reset => commands::reset::run(),
         Cmd::Open { first, second } => commands::open::run(first, second),
-        Cmd::Index { project, all, dry_run } => commands::index::run(project, all, dry_run),
-        Cmd::Gc { force, dry_run, sync } => commands::gc::run(force, dry_run, sync),
+        Cmd::Index {
+            project,
+            all,
+            dry_run,
+        } => commands::index::run(project, all, dry_run),
+        Cmd::Gc {
+            force,
+            dry_run,
+            sync,
+        } => commands::gc::run(force, dry_run, sync),
         Cmd::Update => commands::update::run(),
         Cmd::RefreshUpdateCache => {
             let _ = services::updater::refresh_cache();

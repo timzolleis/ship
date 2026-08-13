@@ -1,4 +1,5 @@
-use crate::errors::Result;
+use crate::errors::{Error, Result};
+use crate::ui::{Picker, Row};
 
 // dialoguer's theme appends ": " itself, so trailing colons in ported
 // prompt messages are stripped to avoid "Branch name:: ".
@@ -37,16 +38,25 @@ pub fn confirm(msg: &str, default: bool) -> Result<bool> {
 /// Checkbox list. `items` carries each label with its initial checked state;
 /// the result is the indices left checked.
 pub fn multi_select(msg: &str, items: &[(String, bool)]) -> Result<Vec<usize>> {
-    Ok(dialoguer::MultiSelect::new()
-        .with_prompt(clean(msg))
-        .items_checked(items)
-        .interact()?)
+    let rows = items
+        .iter()
+        .enumerate()
+        .map(|(i, (label, checked))| Row::new(i, [label.clone()]).checked(*checked))
+        .collect();
+    let picked = Picker::new(msg, rows).multi().interact()?;
+    Ok(picked.into_iter().map(|r| r.value).collect())
 }
 
 pub fn select(msg: &str, items: &[String]) -> Result<usize> {
-    Ok(dialoguer::Select::new()
-        .with_prompt(clean(msg))
-        .items(items)
-        .default(0)
-        .interact()?)
+    let rows = items
+        .iter()
+        .enumerate()
+        .map(|(i, label)| Row::new(i, [label.clone()]))
+        .collect();
+    let picked = Picker::new(msg, rows).interact()?;
+    picked
+        .into_iter()
+        .next()
+        .map(|r| r.value)
+        .ok_or_else(|| Error::Prompt("Cancelled.".to_string()))
 }

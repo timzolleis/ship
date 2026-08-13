@@ -106,7 +106,10 @@ fn show(alias: Option<String>, all: bool) -> Result<()> {
 
     let Some(raw) = config::read_config_raw()? else {
         println!();
-        println!("  {}", dim("No config yet. Register a project with: ship init"));
+        println!(
+            "  {}",
+            dim("No config yet. Register a project with: ship init")
+        );
         println!();
         return Ok(());
     };
@@ -117,43 +120,45 @@ fn show(alias: Option<String>, all: bool) -> Result<()> {
     let ship_config = config::load_config()?;
     if ship_config.projects.is_empty() {
         println!();
-        println!("  {}", dim("No projects registered. Add one with: ship init"));
+        println!(
+            "  {}",
+            dim("No projects registered. Add one with: ship init")
+        );
         println!();
         return Ok(());
     }
 
     let cwd = cwd_string();
-    let selected: Vec<(String, ProjectConfig)> = if all {
-        ship_config.projects.into_iter().collect()
-    } else {
-        let resolved = match alias {
-            Some(a) => Some(a),
-            None => ship_config
-                .projects
-                .iter()
-                .find(|(_, p)| cwd == p.path || cwd.starts_with(&format!("{}/", p.path)))
-                .map(|(a, _)| a.clone()),
-        };
-        let Some(alias) = resolved else {
-            let aliases: Vec<&str> = ship_config.projects.keys().map(|a| a.as_str()).collect();
-            println!();
-            println!(
-                "  {}",
-                dim("Not inside a registered project. Name one, or use --all:")
-            );
-            println!("    {}", aliases.join(", "));
-            println!();
-            return Ok(());
-        };
-        let project = ship_config
-            .projects
-            .get(&alias)
-            .cloned()
-            .ok_or_else(|| Error::ProjectNotFound {
-                alias: alias.clone(),
+    let selected: Vec<(String, ProjectConfig)> =
+        if all {
+            ship_config.projects.into_iter().collect()
+        } else {
+            let resolved = match alias {
+                Some(a) => Some(a),
+                None => ship_config
+                    .projects
+                    .iter()
+                    .find(|(_, p)| cwd == p.path || cwd.starts_with(&format!("{}/", p.path)))
+                    .map(|(a, _)| a.clone()),
+            };
+            let Some(alias) = resolved else {
+                let aliases: Vec<&str> = ship_config.projects.keys().map(|a| a.as_str()).collect();
+                println!();
+                println!(
+                    "  {}",
+                    dim("Not inside a registered project. Name one, or use --all:")
+                );
+                println!("    {}", aliases.join(", "));
+                println!();
+                return Ok(());
+            };
+            let project = ship_config.projects.get(&alias).cloned().ok_or_else(|| {
+                Error::ProjectNotFound {
+                    alias: alias.clone(),
+                }
             })?;
-        vec![(alias, project)]
-    };
+            vec![(alias, project)]
+        };
 
     for (alias, project) in &selected {
         print_project(alias, project, &lines);
@@ -186,7 +191,14 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
     // every file repeats it.
     let mut flat_shape = false;
 
-    let file_width = project.env.files.keys().map(|f| f.len()).max().unwrap_or(0).max(8);
+    let file_width = project
+        .env
+        .files
+        .keys()
+        .map(|f| f.len())
+        .max()
+        .unwrap_or(0)
+        .max(8);
     let key_width = project
         .env
         .files
@@ -196,7 +208,11 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
         .max()
         .unwrap_or(0)
         .max(3);
-    let handling_width = EnvVarType::ALL.iter().map(|t| t.label().len()).max().unwrap_or(0);
+    let handling_width = EnvVarType::ALL
+        .iter()
+        .map(|t| t.label().len())
+        .max()
+        .unwrap_or(0);
 
     println!();
     println!(
@@ -292,7 +308,10 @@ fn print_copy_paths(alias: &str, project: &ProjectConfig, lines: &LineMap) {
 
 fn print_legend() {
     println!();
-    println!("  {}", dim("Handling — the JSON \"type\" field on each var:"));
+    println!(
+        "  {}",
+        dim("Handling — the JSON \"type\" field on each var:")
+    );
     for t in EnvVarType::ALL {
         println!(
             "    {}  {}",
@@ -330,11 +349,25 @@ mod tests {
 
         assert_eq!(at(&["projects", "znb"]), Some(3));
         assert_eq!(
-            at(&["projects", "znb", "env", "files", "apps/console/.env", "BETTER_AUTH_URL"]),
+            at(&[
+                "projects",
+                "znb",
+                "env",
+                "files",
+                "apps/console/.env",
+                "BETTER_AUTH_URL"
+            ]),
             Some(5)
         );
         assert_eq!(
-            at(&["projects", "znb", "env", "files", "apps/console/.env", "DATABASE_URL"]),
+            at(&[
+                "projects",
+                "znb",
+                "env",
+                "files",
+                "apps/console/.env",
+                "DATABASE_URL"
+            ]),
             Some(5)
         );
     }
@@ -343,7 +376,10 @@ mod tests {
     #[test]
     fn braces_in_values_do_not_shift_the_path() {
         let map = LineMap::build(COMPACT);
-        assert_eq!(map.line_of(&["projects", "znb", "worktree", "dirPattern"]), Some(7));
+        assert_eq!(
+            map.line_of(&["projects", "znb", "worktree", "dirPattern"]),
+            Some(7)
+        );
     }
 
     #[test]
@@ -354,8 +390,19 @@ mod tests {
         .unwrap();
         let map = LineMap::build(&pretty);
         let line = map
-            .line_of(&["projects", "znb", "env", "files", "apps/console/.env", "DATABASE_URL"])
+            .line_of(&[
+                "projects",
+                "znb",
+                "env",
+                "files",
+                "apps/console/.env",
+                "DATABASE_URL",
+            ])
             .unwrap();
-        assert!(pretty.lines().nth(line - 1).unwrap().contains("DATABASE_URL"));
+        assert!(pretty
+            .lines()
+            .nth(line - 1)
+            .unwrap()
+            .contains("DATABASE_URL"));
     }
 }

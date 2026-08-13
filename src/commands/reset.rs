@@ -34,7 +34,11 @@ fn run_inner() -> Result<()> {
             ResetStep::Drop => println!("  {} Dropped {}", green("✓"), workspace.db_name),
             ResetStep::Clone => println!("  {} Cloned → {}", green("✓"), workspace.db_name),
             ResetStep::Db => {
-                println!("  {} {}", green("✓"), e.detail.as_deref().unwrap_or("db command"))
+                println!(
+                    "  {} {}",
+                    green("✓"),
+                    e.detail.as_deref().unwrap_or("db command")
+                )
             }
         }
     }

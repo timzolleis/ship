@@ -16,7 +16,10 @@ fn run(repo: &str, args: &[&str]) -> Result<ExecResult> {
 /// the branch off `base` (default HEAD). Prunes stale worktree metadata first.
 pub fn worktree_add(repo: &str, path: &str, branch: &str, base: Option<&str>) -> Result<()> {
     let _ = run(repo, &["worktree", "prune"]);
-    let local_exists = !run(repo, &["branch", "--list", branch])?.stdout.trim().is_empty();
+    let local_exists = !run(repo, &["branch", "--list", branch])?
+        .stdout
+        .trim()
+        .is_empty();
     if local_exists {
         run(repo, &["worktree", "add", path, branch])?;
         return Ok(());
@@ -31,7 +34,14 @@ pub fn worktree_add(repo: &str, path: &str, branch: &str, base: Option<&str>) ->
     } else {
         run(
             repo,
-            &["worktree", "add", "-b", branch, path, base.unwrap_or("HEAD")],
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                path,
+                base.unwrap_or("HEAD"),
+            ],
         )?;
     }
     Ok(())
@@ -98,7 +108,10 @@ pub fn pull_ff_only(repo: &str) -> Result<()> {
 }
 
 pub fn is_dirty(repo: &str) -> Result<bool> {
-    Ok(!run(repo, &["status", "--porcelain"])?.stdout.trim().is_empty())
+    Ok(!run(repo, &["status", "--porcelain"])?
+        .stdout
+        .trim()
+        .is_empty())
 }
 
 pub fn rev_parse_head(repo: &str) -> Result<String> {
@@ -106,7 +119,10 @@ pub fn rev_parse_head(repo: &str) -> Result<String> {
 }
 
 pub fn rev_parse(repo: &str, reference: &str) -> Result<String> {
-    Ok(run(repo, &["rev-parse", reference])?.stdout.trim().to_string())
+    Ok(run(repo, &["rev-parse", reference])?
+        .stdout
+        .trim()
+        .to_string())
 }
 
 /// Fast-forward a local branch ref to match origin (works for

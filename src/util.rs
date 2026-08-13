@@ -21,7 +21,11 @@ pub fn resolve_path(base: &str, rel: &str) -> String {
             Component::Prefix(_) => {}
         }
     }
-    let mut out = if rooted { String::from("/") } else { String::new() };
+    let mut out = if rooted {
+        String::from("/")
+    } else {
+        String::new()
+    };
     out.push_str(&parts.join("/"));
     out
 }

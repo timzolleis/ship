@@ -38,7 +38,15 @@ pub struct InitArgs {
 // .env auto-detection
 // ---------------------------------------------------------------------------
 
-const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", ".next", ".cache", ".turbo"];
+const EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    ".cache",
+    ".turbo",
+];
 
 // Local state a git checkout can't carry. Deliberately narrow: uploads/ and
 // storage/ are plausible but easily multi-GB, and a silent huge copy on every
@@ -46,9 +54,8 @@ const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", ".next
 const STATE_EXTENSIONS: &[&str] = &["db", "sqlite", "sqlite3", "pem", "key", "crt"];
 
 static ENV_LINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([A-Z_]+)=(.+)$").unwrap());
-static DATABASE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"postgres(?:ql)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)").unwrap()
-});
+static DATABASE_URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"postgres(?:ql)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)").unwrap());
 
 struct DetectedEnv {
     file: String,
@@ -56,14 +63,18 @@ struct DetectedEnv {
 }
 
 fn find_env_files(dir: &Path, root: &Path, results: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if EXCLUDED_DIRS.contains(&name.as_str()) {
             continue;
         }
         let full = entry.path();
-        let Ok(meta) = fs::metadata(&full) else { continue };
+        let Ok(meta) = fs::metadata(&full) else {
+            continue;
+        };
         if meta.is_dir() {
             find_env_files(&full, root, results);
         } else if name == ".env" {
@@ -75,8 +86,13 @@ fn find_env_files(dir: &Path, root: &Path, results: &mut Vec<String>) {
 }
 
 fn strip_quotes(v: &str) -> &str {
-    let v = v.strip_prefix('"').or_else(|| v.strip_prefix('\'')).unwrap_or(v);
-    v.strip_suffix('"').or_else(|| v.strip_suffix('\'')).unwrap_or(v)
+    let v = v
+        .strip_prefix('"')
+        .or_else(|| v.strip_prefix('\''))
+        .unwrap_or(v);
+    v.strip_suffix('"')
+        .or_else(|| v.strip_suffix('\''))
+        .unwrap_or(v)
 }
 
 fn detect_env_files(cwd: &Path) -> Vec<DetectedEnv> {
@@ -90,7 +106,9 @@ fn detect_env_files(cwd: &Path) -> Vec<DetectedEnv> {
         };
         let mut vars = Vec::new();
         for line in content.split('\n') {
-            let Some(caps) = ENV_LINE_RE.captures(line) else { continue };
+            let Some(caps) = ENV_LINE_RE.captures(line) else {
+                continue;
+            };
             let key = caps[1].to_string();
             let value = strip_quotes(&caps[2]).to_string();
 
@@ -103,7 +121,10 @@ fn detect_env_files(cwd: &Path) -> Vec<DetectedEnv> {
             }
         }
         if !vars.is_empty() {
-            results.push(DetectedEnv { file: candidate, vars });
+            results.push(DetectedEnv {
+                file: candidate,
+                vars,
+            });
         }
     }
     results
@@ -138,14 +159,18 @@ fn resolve(opt: Option<String>, msg: &str, default: &str) -> Result<String> {
 // ---------------------------------------------------------------------------
 
 fn find_state_files(dir: &Path, root: &Path, results: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if EXCLUDED_DIRS.contains(&name.as_str()) {
             continue;
         }
         let full = entry.path();
-        let Ok(meta) = fs::metadata(&full) else { continue };
+        let Ok(meta) = fs::metadata(&full) else {
+            continue;
+        };
         if meta.is_dir() {
             find_state_files(&full, root, results);
         } else if full
@@ -425,7 +450,10 @@ fn run_inner(opts: InitArgs) -> Result<()> {
     let ship_config = match config::load_config() {
         Ok(c) => c,
         Err(Error::ConfigOutdated { .. }) | Err(Error::ParseConfig { .. }) => {
-            println!("  {}", dim("Existing config could not be parsed — starting fresh."));
+            println!(
+                "  {}",
+                dim("Existing config could not be parsed — starting fresh.")
+            );
             println!();
             config::delete_config()?;
             ShipConfig::default()
@@ -456,7 +484,10 @@ fn run_inner(opts: InitArgs) -> Result<()> {
     }
 
     // 2. Project path.
-    let default_path = existing.as_ref().map(|e| e.path.clone()).unwrap_or_else(|| cwd.clone());
+    let default_path = existing
+        .as_ref()
+        .map(|e| e.path.clone())
+        .unwrap_or_else(|| cwd.clone());
     let project_path = resolve(opts.path, "Project path:", &default_path)?;
 
     // 3. Auto-detect .env files.
@@ -533,7 +564,10 @@ fn run_inner(opts: InitArgs) -> Result<()> {
     println!();
     println!("  Scanning for local state files...");
     let detected_copy = detect_copy_paths(Path::new(&cwd));
-    let stored_copy = existing.as_ref().map(|e| e.copy.clone()).unwrap_or_default();
+    let stored_copy = existing
+        .as_ref()
+        .map(|e| e.copy.clone())
+        .unwrap_or_default();
     let copy_paths = if detected_copy.is_empty() && stored_copy.is_empty() {
         println!("    {}", dim("None found."));
         Vec::new()
@@ -560,12 +594,23 @@ fn run_inner(opts: InitArgs) -> Result<()> {
         .map(|e| e.database.docker_container().to_string())
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| "postgres".to_string());
-    let db_container = resolve(opts.db_container, "Database container name:", &existing_container)?;
+    let db_container = resolve(
+        opts.db_container,
+        "Database container name:",
+        &existing_container,
+    )?;
     let db_user = resolve(opts.db_user, "Database user:", &inferred_db_user)?;
-    let db_source = resolve(opts.db_source, "Source database to clone from:", &inferred_db_source)?;
+    let db_source = resolve(
+        opts.db_source,
+        "Source database to clone from:",
+        &inferred_db_source,
+    )?;
 
     // 5. Command scopes — each an ordered sequence, blank line ends the scope.
-    let existing_cmds = existing.as_ref().map(|e| e.commands.clone()).unwrap_or_default();
+    let existing_cmds = existing
+        .as_ref()
+        .map(|e| e.commands.clone())
+        .unwrap_or_default();
     println!();
     let install_cmds = prompt_scope(
         opts.install_cmd,
@@ -639,7 +684,11 @@ fn run_inner(opts: InitArgs) -> Result<()> {
         "  {} Project {} {}.",
         green("✓"),
         bold(format!("\"{alias}\"")),
-        if existing.is_some() { "updated" } else { "registered" }
+        if existing.is_some() {
+            "updated"
+        } else {
+            "registered"
+        }
     );
     println!(
         "  {} Root route     https://{} → :{}",

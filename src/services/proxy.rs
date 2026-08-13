@@ -70,14 +70,24 @@ pub fn reload() {
     if is_running() {
         let _ = shell::exec(
             "docker",
-            &["exec", CONTAINER, "caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
+            &[
+                "exec",
+                CONTAINER,
+                "caddy",
+                "reload",
+                "--config",
+                "/etc/caddy/Caddyfile",
+            ],
         );
     }
 }
 
 pub fn add_route(domain: &str, port: u16) -> Result<()> {
     let content = read_caddyfile()?;
-    if caddyfile::parse_routes(&content).iter().any(|r| r.domain == domain) {
+    if caddyfile::parse_routes(&content)
+        .iter()
+        .any(|r| r.domain == domain)
+    {
         return Err(Error::RouteExists {
             domain: domain.to_string(),
         });
@@ -89,7 +99,10 @@ pub fn add_route(domain: &str, port: u16) -> Result<()> {
 
 pub fn remove_route(domain: &str) -> Result<()> {
     let content = read_caddyfile()?;
-    if !caddyfile::parse_routes(&content).iter().any(|r| r.domain == domain) {
+    if !caddyfile::parse_routes(&content)
+        .iter()
+        .any(|r| r.domain == domain)
+    {
         return Err(Error::RouteNotFound {
             domain: domain.to_string(),
         });
@@ -111,14 +124,22 @@ pub fn start() -> Result<()> {
     shell::exec(
         "docker",
         &[
-            "run", "-d",
-            "--name", CONTAINER,
-            "--restart", "unless-stopped",
-            "-p", "80:80",
-            "-p", "443:443",
-            "-v", &caddyfile_mount,
-            "-v", &data_mount,
-            "-v", &config_mount,
+            "run",
+            "-d",
+            "--name",
+            CONTAINER,
+            "--restart",
+            "unless-stopped",
+            "-p",
+            "80:80",
+            "-p",
+            "443:443",
+            "-v",
+            &caddyfile_mount,
+            "-v",
+            &data_mount,
+            "-v",
+            &config_mount,
             "caddy:2-alpine",
         ],
     )
@@ -141,8 +162,13 @@ pub fn trust() -> Result<()> {
     shell::exec(
         "sudo",
         &[
-            "security", "add-trusted-cert", "-d", "-r", "trustRoot",
-            "-k", "/Library/Keychains/System.keychain",
+            "security",
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
             &ca_path.display().to_string(),
         ],
     )

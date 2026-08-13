@@ -23,9 +23,17 @@ fn run_inner(project: &str) -> Result<()> {
     println!("  {} Fetched        origin", green("✓"));
 
     if result.pulled && result.head_moved {
-        println!("  {} Pulled         main {}", green("✓"), dim("(fast-forward)"));
+        println!(
+            "  {} Pulled         main {}",
+            green("✓"),
+            dim("(fast-forward)")
+        );
     } else if result.pulled {
-        println!("  {} Pulled         {}", dim("  ·"), dim("already up to date"));
+        println!(
+            "  {} Pulled         {}",
+            dim("  ·"),
+            dim("already up to date")
+        );
     } else if let Some(skipped) = &result.skipped_pull {
         println!("  {} Skipped pull   {}", yellow("⚠"), dim(skipped));
     }

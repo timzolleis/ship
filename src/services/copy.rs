@@ -12,7 +12,10 @@ pub struct CopyOutcome {
 }
 
 pub enum CopyStatus {
-    Copied { files: usize, bytes: u64 },
+    Copied {
+        files: usize,
+        bytes: u64,
+    },
     /// Target already has it — a resumed `ship create` must never clobber a
     /// workspace's own state.
     SkippedExisting,
@@ -26,7 +29,11 @@ fn is_contained(path: &str) -> bool {
     !p.is_absolute() && !p.components().any(|c| c == Component::ParentDir)
 }
 
-pub fn copy_paths(source_dir: &str, target_dir: &str, paths: &[String]) -> Result<Vec<CopyOutcome>> {
+pub fn copy_paths(
+    source_dir: &str,
+    target_dir: &str,
+    paths: &[String],
+) -> Result<Vec<CopyOutcome>> {
     let mut outcomes = Vec::new();
 
     for path in paths {
@@ -160,13 +167,9 @@ mod tests {
         write(&src, "development/sqlite-data/database.db", "main");
         write(&src, "development/sqlite-data/database.db-wal", "wal");
 
-        let out =
-            copy_paths(&src, &dst, &["development/sqlite-data".to_string()]).unwrap();
+        let out = copy_paths(&src, &dst, &["development/sqlite-data".to_string()]).unwrap();
 
-        assert!(matches!(
-            out[0].status,
-            CopyStatus::Copied { files: 2, .. }
-        ));
+        assert!(matches!(out[0].status, CopyStatus::Copied { files: 2, .. }));
         let landed = Path::new(&dst).join("development/sqlite-data/database.db-wal");
         assert_eq!(fs::read_to_string(landed).unwrap(), "wal");
     }

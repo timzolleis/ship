@@ -22,7 +22,12 @@ fn run_inner() -> Result<()> {
         return Ok(());
     }
 
-    println!("{} {}  {}", dim("Latest: "), bold(&latest), dim("(updating…)"));
+    println!(
+        "{} {}  {}",
+        dim("Latest: "),
+        bold(&latest),
+        dim("(updating…)")
+    );
     updater::install_latest(&latest)?;
     println!("{}", green(format!("✓ Updated to {latest}.")));
     println!("{}", dim("Run 'ship --version' to confirm."));

@@ -53,7 +53,9 @@ pub fn sync(pc: &ProjectConfig, base: Option<&str>) -> Result<SyncResult> {
 
     let before = git::rev_parse_head(repo)?;
     if git::pull_ff_only(repo).is_err() {
-        return Ok(skipped("cannot fast-forward (main has diverged)".to_string()));
+        return Ok(skipped(
+            "cannot fast-forward (main has diverged)".to_string(),
+        ));
     }
     let after = git::rev_parse_head(repo)?;
     let head_moved = before != after;

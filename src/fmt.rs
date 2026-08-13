@@ -4,9 +4,8 @@ use std::sync::LazyLock;
 
 // Piped output (agents, `| grep`, CI logs) gets plain text. Callers still pad
 // columns before colorizing, so widths hold either way.
-static COLOR: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
-});
+static COLOR: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal());
 
 fn paint(code: &str, s: impl Display) -> String {
     if *COLOR {

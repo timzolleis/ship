@@ -25,10 +25,20 @@ fn run_inner() -> Result<()> {
         return Ok(());
     }
 
-    let alias_width = entries.iter().map(|(a, _)| a.len()).max().unwrap_or(0).max(7);
+    let alias_width = entries
+        .iter()
+        .map(|(a, _)| a.len())
+        .max()
+        .unwrap_or(0)
+        .max(7);
 
     println!();
-    println!("  {:<aw$}  {:<40}  DB CONTAINER", "ALIAS", "PATH", aw = alias_width);
+    println!(
+        "  {:<aw$}  {:<40}  DB CONTAINER",
+        "ALIAS",
+        "PATH",
+        aw = alias_width
+    );
     println!(
         "  {}  {}  {}",
         dim("─".repeat(alias_width)),
@@ -48,7 +58,11 @@ fn run_inner() -> Result<()> {
     println!();
     println!(
         "  {}",
-        dim(format!("{} project{}", entries.len(), plural(entries.len())))
+        dim(format!(
+            "{} project{}",
+            entries.len(),
+            plural(entries.len())
+        ))
     );
     println!();
     Ok(())

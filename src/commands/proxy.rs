@@ -65,7 +65,10 @@ pub fn run(cmd: Option<ProxyCmd>) {
         }
         Some(ProxyCmd::Trust) => {
             match proxy::trust() {
-                Ok(()) => println!("  {} CA trusted. HTTPS will work in all browsers.", green("✓")),
+                Ok(()) => println!(
+                    "  {} CA trusted. HTTPS will work in all browsers.",
+                    green("✓")
+                ),
                 Err(e) => println!("  {} {}", red("✗"), e),
             }
             Ok(())
@@ -127,7 +130,11 @@ fn ls() -> Result<()> {
 
 fn print_routes(routes: &[crate::domain::caddyfile::Route]) {
     for (i, route) in routes.iter().enumerate() {
-        let prefix = if i == routes.len() - 1 { "└──" } else { "├──" };
+        let prefix = if i == routes.len() - 1 {
+            "└──"
+        } else {
+            "├──"
+        };
         println!(
             "  {} {} {} localhost:{}",
             prefix,

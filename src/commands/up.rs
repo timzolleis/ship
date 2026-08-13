@@ -95,7 +95,10 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
     // Resolve dev command sequence.
     let dev = project_config.commands.dev.clone();
     let Some((last, rest)) = dev.split_last() else {
-        println!("  {}", dim("No dev command configured. Proxy route is active."));
+        println!(
+            "  {}",
+            dim("No dev command configured. Proxy route is active.")
+        );
         return Ok(());
     };
     let resolved_last = last.replace("{port}", &target.port.to_string());

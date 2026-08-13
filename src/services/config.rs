@@ -41,16 +41,19 @@ fn read_raw(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
-    fs::read_to_string(path).map(Some).map_err(|e| Error::ReadFile {
-        path: path.display().to_string(),
-        detail: e.to_string(),
-    })
+    fs::read_to_string(path)
+        .map(Some)
+        .map_err(|e| Error::ReadFile {
+            path: path.display().to_string(),
+            detail: e.to_string(),
+        })
 }
 
 fn write_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
     ensure_dir()?;
-    let json =
-        serde_json::to_string_pretty(data).map_err(|e| Error::EncodeConfig { detail: e.to_string() })?;
+    let json = serde_json::to_string_pretty(data).map_err(|e| Error::EncodeConfig {
+        detail: e.to_string(),
+    })?;
     fs::write(path, json + "\n").map_err(|e| Error::WriteFile {
         path: path.display().to_string(),
         detail: e.to_string(),

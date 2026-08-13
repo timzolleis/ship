@@ -19,10 +19,7 @@ const TARGETS: &[&str] = &["editor", "url", "db"];
 fn split_args(first: Option<&str>, second: Option<&str>) -> (Option<String>, String) {
     match first {
         Some(f) if TARGETS.contains(&f) => (None, f.to_string()),
-        Some(f) => (
-            Some(f.to_string()),
-            second.unwrap_or("editor").to_string(),
-        ),
+        Some(f) => (Some(f.to_string()), second.unwrap_or("editor").to_string()),
         None => (None, "editor".to_string()),
     }
 }
@@ -48,7 +45,14 @@ fn resolve_workspace(
     }
     let items: Vec<String> = workspaces
         .iter()
-        .map(|w| format!("{}  {}  {}", w.project, w.branch, crate::fmt::dim(&w.proxy_domain)))
+        .map(|w| {
+            format!(
+                "{}  {}  {}",
+                w.project,
+                w.branch,
+                crate::fmt::dim(&w.proxy_domain)
+            )
+        })
         .collect();
     let idx = prompt::select("Select a workspace", &items)?;
     Ok(workspaces[idx].clone())
@@ -81,7 +85,11 @@ fn run_inner(first: Option<String>, second: Option<String>) -> Result<()> {
             database::session(DbTarget::from(&project_config.database), &workspace.db_name)?;
         }
         other => {
-            println!("  {} Unknown target '{}'. Use: editor, url, db", red("✗"), other);
+            println!(
+                "  {} Unknown target '{}'. Use: editor, url, db",
+                red("✗"),
+                other
+            );
         }
     }
     Ok(())

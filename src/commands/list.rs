@@ -26,7 +26,10 @@ fn run_inner(project_opt: Option<String>) -> Result<()> {
     if filtered.is_empty() {
         println!();
         println!("  {}", dim("No active workspaces."));
-        println!("  {}", dim("Create one with: ship create <project> <branch>"));
+        println!(
+            "  {}",
+            dim("Create one with: ship create <project> <branch>")
+        );
         println!();
         return Ok(());
     }
@@ -64,7 +67,11 @@ fn run_inner(project_opt: Option<String>) -> Result<()> {
 
     println!(
         "  {}",
-        dim(format!("{} workspace{}", filtered.len(), plural(filtered.len())))
+        dim(format!(
+            "{} workspace{}",
+            filtered.len(),
+            plural(filtered.len())
+        ))
     );
     println!();
     Ok(())

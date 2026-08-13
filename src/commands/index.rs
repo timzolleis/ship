@@ -31,7 +31,10 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
         println!();
         match &project_opt {
             Some(p) => println!("  {} {}", red("Project not found:"), p),
-            None => println!("  {}", dim("No projects registered. Run 'ship init' first.")),
+            None => println!(
+                "  {}",
+                dim("No projects registered. Run 'ship init' first.")
+            ),
         }
         println!();
         return Ok(());
@@ -93,7 +96,9 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
 
             let db_found = container_running && database::exists(target, &names.db_name);
 
-            let route = existing_routes.iter().find(|r| r.domain == names.proxy_domain);
+            let route = existing_routes
+                .iter()
+                .find(|r| r.domain == names.proxy_domain);
             let port = match route {
                 Some(r) => r.port,
                 None => {

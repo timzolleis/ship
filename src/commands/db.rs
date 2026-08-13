@@ -1,8 +1,8 @@
 use crate::domain::workspace_locate::locate_workspace;
 use crate::errors::Result;
 use crate::fmt::{bold, red};
-use crate::services::database::{self, DbTarget};
 use crate::services::config;
+use crate::services::database::{self, DbTarget};
 use crate::util::cwd_string;
 
 // ---------------------------------------------------------------------------

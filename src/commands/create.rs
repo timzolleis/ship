@@ -3,9 +3,7 @@ use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, red, yellow};
 use crate::prompt;
 use crate::services::env::PatchResult;
-use crate::services::workspace::{
-    provision, ProvisionInput, ProvisionStep, Status, StepEvent,
-};
+use crate::services::workspace::{provision, ProvisionInput, ProvisionStep, Status, StepEvent};
 use crate::services::{config, editor};
 use crate::util::resolve_path;
 
@@ -53,7 +51,13 @@ fn ok_line(label: &str, detail: &str) -> String {
 }
 
 fn skip_line(label: &str, detail: &str) -> String {
-    format!("  {} {:<14} {} {}", dim("•"), label, detail, dim("(already present)"))
+    format!(
+        "  {} {:<14} {} {}",
+        dim("•"),
+        label,
+        detail,
+        dim("(already present)")
+    )
 }
 
 fn warn_line(label: &str, detail: &str) -> String {

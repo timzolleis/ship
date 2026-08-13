@@ -16,7 +16,9 @@ pub enum Error {
     #[error("Failed to parse {file}: {detail}")]
     ParseConfig { file: String, detail: String },
 
-    #[error("Config format has changed — run 'ship init' to re-register your projects.\n  ({detail})")]
+    #[error(
+        "Config format has changed — run 'ship init' to re-register your projects.\n  ({detail})"
+    )]
     ConfigOutdated { detail: String },
 
     #[error("Failed to encode config: {detail}")]

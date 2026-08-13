@@ -33,8 +33,9 @@ pub fn read_cache() -> Option<UpdateCache> {
 }
 
 pub fn write_cache(cache: &UpdateCache) -> Result<()> {
-    let json = serde_json::to_string_pretty(cache)
-        .map_err(|e| Error::EncodeConfig { detail: e.to_string() })?;
+    let json = serde_json::to_string_pretty(cache).map_err(|e| Error::EncodeConfig {
+        detail: e.to_string(),
+    })?;
     fs::write(cache_path(), json + "\n").map_err(|e| Error::WriteFile {
         path: cache_path().display().to_string(),
         detail: e.to_string(),
@@ -62,9 +63,9 @@ pub fn fetch_latest_version() -> Result<String> {
                 other => other.to_string(),
             },
         })?;
-    let json: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| Error::UpdateCheck { detail: e.to_string() })?;
+    let json: serde_json::Value = resp.into_json().map_err(|e| Error::UpdateCheck {
+        detail: e.to_string(),
+    })?;
     json.get("tag_name")
         .and_then(|v| v.as_str())
         .map(String::from)
@@ -187,10 +188,13 @@ pub fn install_latest(version: &str) -> Result<()> {
     })?;
 
     // Ad-hoc signing keeps macOS from killing the swapped-in binary.
-    shell::exec("codesign", &["--sign", "-", "--force", &temp_path.display().to_string()])
-        .map_err(|e| Error::UpdateInstall {
-            detail: format!("codesign: {e}"),
-        })?;
+    shell::exec(
+        "codesign",
+        &["--sign", "-", "--force", &temp_path.display().to_string()],
+    )
+    .map_err(|e| Error::UpdateInstall {
+        detail: format!("codesign: {e}"),
+    })?;
 
     fs::rename(&temp_path, &target).map_err(|e| Error::UpdateInstall {
         detail: format!("rename: {e}"),

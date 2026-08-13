@@ -155,7 +155,10 @@ impl<'de> Deserialize<'de> for EnvConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         Ok(match EnvConfigRepr::deserialize(d)? {
             EnvConfigRepr::PerFile { files } => EnvConfig { files },
-            EnvConfigRepr::Flat { files, auto_detected } => EnvConfig {
+            EnvConfigRepr::Flat {
+                files,
+                auto_detected,
+            } => EnvConfig {
                 files: files
                     .into_iter()
                     .map(|f| (f, auto_detected.clone()))

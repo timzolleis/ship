@@ -1,9 +1,11 @@
 use crate::errors::Result;
-use crate::fmt::{blue, bold, dim, green, red, yellow};
+use crate::fmt::{bold, dim, green, red, yellow};
 use crate::prompt;
 use crate::schema::{ProjectConfig, Workspace};
+use crate::services::github::{self, Pr};
 use crate::services::workspace::{teardown, TeardownOptions};
-use crate::services::{config, shell, sync};
+use crate::services::{config, sync};
+use crate::ui::{Row, Table};
 use crate::util::plural;
 use std::collections::HashSet;
 
@@ -11,69 +13,11 @@ use std::collections::HashSet;
 // ship gc [--force] [--dry-run] [--sync]
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Deserialize, Clone)]
-struct PrStatus {
-    state: String,
-    number: i64,
-    #[serde(rename = "mergedAt")]
-    merged_at: Option<String>,
-}
-
 struct Checked {
     ws: Workspace,
     project_config: Option<ProjectConfig>,
-    pr_status: Option<PrStatus>,
+    pr: Option<Pr>,
     pr_label: String,
-}
-
-fn time_ago(iso: &str) -> String {
-    let Ok(t) = chrono::DateTime::parse_from_rfc3339(iso) else {
-        return "just now".to_string();
-    };
-    let hours = chrono::Utc::now().signed_duration_since(t).num_hours();
-    if hours < 1 {
-        return "just now".to_string();
-    }
-    if hours < 24 {
-        return format!("{hours}h ago");
-    }
-    format!("{}d ago", hours / 24)
-}
-
-fn check_workspace(ws: Workspace) -> Checked {
-    let project_config = config::get_project(&ws.project).ok();
-
-    let pr_status: Option<PrStatus> = project_config.as_ref().and_then(|pc| {
-        shell::exec_in(
-            &pc.path,
-            "gh",
-            &["pr", "view", &ws.branch, "--json", "state,number,mergedAt"],
-        )
-        .ok()
-        .and_then(|r| serde_json::from_str(&r.stdout).ok())
-    });
-
-    let pr_label = match &pr_status {
-        Some(pr) if pr.state == "MERGED" => format!(
-            "PR #{} {}{}",
-            pr.number,
-            green("merged"),
-            pr.merged_at
-                .as_deref()
-                .map(|m| format!(" {}", dim(time_ago(m))))
-                .unwrap_or_default()
-        ),
-        Some(pr) if pr.state == "OPEN" => format!("PR #{} {}", pr.number, blue("open")),
-        Some(pr) => format!("PR #{} {}", pr.number, yellow("closed")),
-        None => dim("no PR"),
-    };
-
-    Checked {
-        ws,
-        project_config,
-        pr_status,
-        pr_label,
-    }
 }
 
 /// Tear down each cleaned workspace (worktree + branch + remote branch,
@@ -111,14 +55,22 @@ fn gc_cleanup(to_clean: &[&Checked]) -> Result<usize> {
     Ok(to_clean.len())
 }
 
-fn row(c: &Checked, verdict: &str) -> String {
-    format!(
-        "  {}  {} {}  → {}",
-        c.ws.project,
-        bold(format!("{:<22}", c.ws.branch)),
-        c.pr_label,
-        verdict
+/// `<project>  <branch>  PR #42 merged 2d ago  → keep`. The verdict is last,
+/// so measuring the table before verdicts are known still lines up.
+fn row(c: &Checked, verdict: &str) -> Row<()> {
+    Row::new(
+        (),
+        [
+            dim(&c.ws.project),
+            bold(&c.ws.branch),
+            c.pr_label.clone(),
+            format!("→ {verdict}"),
+        ],
     )
+}
+
+fn line(table: &Table, c: &Checked, verdict: &str) -> String {
+    format!("  {}", table.line(&row(c, verdict), ""))
 }
 
 pub fn run(force: bool, dry_run: bool, should_sync: bool) {
@@ -143,31 +95,29 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
     );
 
     // Phase 1: check all PR statuses in parallel (gh pr view per workspace).
-    let checked: Vec<Checked> = std::thread::scope(|s| {
-        let handles: Vec<_> = workspaces
-            .iter()
-            .map(|ws| {
-                let ws = ws.clone();
-                s.spawn(move || check_workspace(ws))
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    let checked: Vec<Checked> = github::look_up_all(&workspaces)
+        .into_iter()
+        .zip(workspaces.iter().cloned())
+        .map(|(looked_up, ws)| Checked {
+            ws,
+            project_config: looked_up.project_config,
+            pr_label: github::pr_label(looked_up.pr.as_ref()),
+            pr: looked_up.pr,
+        })
+        .collect();
 
     println!();
 
     // Phase 2: display results and prompt for cleanup.
-    let is_merged = |c: &&Checked| {
-        c.pr_status
-            .as_ref()
-            .map(|p| p.state == "MERGED")
-            .unwrap_or(false)
-    };
+    let is_merged = |c: &&Checked| c.pr.as_ref().map(Pr::is_merged).unwrap_or(false);
     let merged: Vec<&Checked> = checked.iter().filter(is_merged).collect();
     let kept: Vec<&Checked> = checked.iter().filter(|c| !is_merged(c)).collect();
 
+    let all_rows: Vec<Row<()>> = checked.iter().map(|c| row(c, "")).collect();
+    let table = Table::measure(&all_rows);
+
     for c in &kept {
-        println!("{}", row(c, &dim("keep")));
+        println!("{}", line(&table, c, &dim("keep")));
     }
 
     let cleaned: usize;
@@ -181,7 +131,7 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
 
     if dry_run {
         for c in &merged {
-            println!("{}", row(c, &yellow("would tear down")));
+            println!("{}", line(&table, c, &yellow("would tear down")));
         }
         cleaned = merged.len();
     } else {
@@ -192,13 +142,16 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
             let mut approved = Vec::new();
             for c in &merged {
                 let ok = prompt::confirm(
-                    &format!("{}/{} — {}. Tear down?", c.ws.project, c.ws.branch, c.pr_label),
+                    &format!(
+                        "{}/{} — {}. Tear down?",
+                        c.ws.project, c.ws.branch, c.pr_label
+                    ),
                     false,
                 )?;
                 if ok {
                     approved.push(*c);
                 } else {
-                    println!("{}", row(c, &dim("skipped")));
+                    println!("{}", line(&table, c, &dim("skipped")));
                 }
             }
             approved
@@ -207,13 +160,17 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
         cleaned = gc_cleanup(&to_clean)?;
 
         for c in &to_clean {
-            println!("{}", row(c, &green("cleaned up")));
+            println!("{}", line(&table, c, &green("cleaned up")));
         }
     }
 
     println!();
     if cleaned > 0 {
-        let verb = if dry_run { "would clean up" } else { "cleaned up" };
+        let verb = if dry_run {
+            "would clean up"
+        } else {
+            "cleaned up"
+        };
         println!(
             "  {} {} {} workspace{}.",
             green("✓"),
@@ -240,7 +197,11 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
                 Err(e) => println!("  {} Sync failed    {}", yellow("⚠"), dim(e.to_string())),
                 Ok(result) => {
                     if result.head_moved {
-                        println!("  {} Base updated   {}", green("✓"), dim("main fast-forwarded"));
+                        println!(
+                            "  {} Base updated   {}",
+                            green("✓"),
+                            dim("main fast-forwarded")
+                        );
                         if result.migrated {
                             println!(
                                 "  {} Base migrated  {}",

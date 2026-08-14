@@ -1,13 +1,18 @@
+use crate::domain::db_orphans::{self, OrphanQuery};
+use crate::domain::workspace_name::resolve_pattern;
 use crate::errors::Result;
 use crate::fmt::{bold, dim, green, red, yellow};
 use crate::prompt;
 use crate::schema::{ProjectConfig, Workspace};
+use crate::services::database::{self, DbTarget};
 use crate::services::github::{self, Pr};
 use crate::services::workspace::{teardown, TeardownOptions};
 use crate::services::{config, sync};
-use crate::ui::{Row, Table};
+use crate::ui::{Picker, Row, Table, Update};
 use crate::util::plural;
+use indexmap::IndexMap;
 use std::collections::HashSet;
+use std::sync::mpsc;
 
 // ---------------------------------------------------------------------------
 // ship gc [--force] [--dry-run] [--sync]
@@ -79,14 +84,230 @@ pub fn run(force: bool, dry_run: bool, should_sync: bool) {
     }
 }
 
-fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
-    let workspaces = config::load_workspaces()?;
+// ---------------------------------------------------------------------------
+// Orphaned databases — match a project's name pattern, claimed by no workspace
+// ---------------------------------------------------------------------------
 
-    if workspaces.is_empty() {
-        println!("  {}", dim("No active workspaces."));
+#[derive(Clone)]
+struct Orphan {
+    project: String,
+    db: String,
+}
+
+/// Column the streamed size lands in, after project and database name.
+const SIZE_COLUMN: usize = 2;
+
+/// Orphans plus the projects that could not be scanned. Warnings are returned
+/// rather than printed so one place decides the section's spacing.
+struct Scan {
+    orphans: Vec<Orphan>,
+    skipped: Vec<String>,
+}
+
+/// Every project's database server, scanned once. A server that is down is
+/// skipped — a stopped container is not evidence of an orphan.
+fn collect_orphans(projects: &IndexMap<String, ProjectConfig>) -> Result<Scan> {
+    let claimed: Vec<String> = config::load_workspaces()?
+        .into_iter()
+        .map(|w| w.db_name)
+        .collect();
+
+    let mut found = Vec::new();
+    let mut skipped = Vec::new();
+    for (alias, pc) in projects {
+        let target = DbTarget::from(&pc.database);
+        if !database::ping(target) {
+            skipped.push(format!(
+                "{} {}",
+                bold(alias),
+                dim("database unreachable — skipped")
+            ));
+            continue;
+        }
+        let listed = match database::list(target) {
+            Ok(listed) => listed,
+            Err(e) => {
+                skipped.push(format!("{} {}", bold(alias), dim(e.to_string())));
+                continue;
+            }
+        };
+        let pattern = resolve_pattern(&pc.worktree.db_name_pattern, &[("project", alias)]);
+        let query = OrphanQuery {
+            db_name_pattern: &pattern,
+            source: &pc.database.source,
+            claimed: &claimed,
+        };
+        found.extend(db_orphans::find(query, &listed).into_iter().map(|db| Orphan {
+            project: alias.clone(),
+            db,
+        }));
+    }
+    Ok(Scan {
+        orphans: found,
+        skipped,
+    })
+}
+
+/// One size lookup per orphan, merged into a single stream keyed by row index.
+/// Each project has its own runtime, so the lookups cannot share one call.
+fn size_stream(
+    orphans: &[Orphan],
+    projects: &IndexMap<String, ProjectConfig>,
+) -> mpsc::Receiver<(usize, String)> {
+    let (tx, rx) = mpsc::channel();
+    for (alias, pc) in projects {
+        let rows: Vec<usize> = orphans
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| &o.project == alias)
+            .map(|(i, _)| i)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let dbs = rows.iter().map(|i| orphans[*i].db.clone()).collect();
+        let inner = database::size_stream(DbTarget::from(&pc.database), dbs);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for (local, size) in inner {
+                let _ = tx.send((rows[local], size));
+            }
+        });
+    }
+    rx
+}
+
+fn orphan_row(o: &Orphan, size: Option<&str>) -> Row<Orphan> {
+    let cells = [dim(&o.project), bold(&o.db)];
+    match size {
+        Some(size) => Row::new(o.clone(), cells.into_iter().chain([size.to_string()])),
+        None => Row::new(o.clone(), cells).pending(),
+    }
+}
+
+/// Checkbox picker over the orphans, then one confirm for the whole set —
+/// same shape as `ship down`. Nothing is checked by default.
+fn pick_orphans(
+    orphans: &[Orphan],
+    projects: &IndexMap<String, ProjectConfig>,
+) -> Result<Vec<Orphan>> {
+    let sizes = size_stream(orphans, projects);
+    let rows = orphans.iter().map(|o| orphan_row(o, None)).collect();
+
+    let picked = Picker::new("Select databases to drop", rows)
+        .multi()
+        .stream(sizes, |(i, size): (usize, String)| {
+            Update::new(i, SIZE_COLUMN, dim(size))
+        })
+        .interact()?;
+
+    Ok(picked.into_iter().map(|r| r.value).collect())
+}
+
+/// gc makes these itself: `gc_cleanup` swallows teardown errors, so a drop
+/// that failed still loses its registry entry. Runs after cleanup so a failure
+/// from this same run is caught.
+fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
+    let projects = config::load_config()?.projects;
+    let Scan { orphans, skipped } = collect_orphans(&projects)?;
+
+    if orphans.is_empty() && skipped.is_empty() {
         return Ok(());
     }
 
+    println!();
+    for warning in &skipped {
+        println!("  {} {}", yellow("⚠"), warning);
+    }
+    if orphans.is_empty() {
+        return Ok(());
+    }
+    if !skipped.is_empty() {
+        println!();
+    }
+
+    let count = orphans.len();
+    println!(
+        "  {} orphaned database{} — no workspace claims {}.",
+        count,
+        plural(count),
+        if count == 1 { "it" } else { "them" }
+    );
+    println!();
+
+    if dry_run {
+        let rows: Vec<Row<Orphan>> = orphans.iter().map(|o| orphan_row(o, None)).collect();
+        let table = Table::measure(&rows);
+        for r in &rows {
+            println!("  {} {}", table.line(r, ""), yellow("→ would drop"));
+        }
+        return Ok(());
+    }
+
+    let picked = if force {
+        orphans
+    } else {
+        pick_orphans(&orphans, &projects)?
+    };
+    if picked.is_empty() {
+        println!("  Cancelled.");
+        return Ok(());
+    }
+
+    let n = picked.len();
+    if !force && !prompt::confirm(&format!("Drop {} database{}?", n, plural(n)), false)? {
+        println!("  Cancelled.");
+        return Ok(());
+    }
+
+    // One failure must not strand the rest.
+    let mut dropped = 0;
+    for o in &picked {
+        let result = config::get_project(&o.project)
+            .and_then(|pc| database::drop_db(DbTarget::from(&pc.database), &o.db));
+        match result {
+            Ok(()) => {
+                dropped += 1;
+                println!("  {} Dropped {}", green("✓"), o.db);
+            }
+            Err(e) => println!("  {} {} {}", yellow("⚠"), o.db, dim(e.to_string())),
+        }
+    }
+
+    println!();
+    println!(
+        "  {} Dropped {} of {} database{}.",
+        if dropped == n { green("✓") } else { yellow("⚠") },
+        dropped,
+        n,
+        plural(n)
+    );
+    Ok(())
+}
+
+fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
+    let workspaces = config::load_workspaces()?;
+
+    // An empty registry is not an early exit — that is exactly the state where
+    // orphaned databases pile up.
+    if workspaces.is_empty() {
+        println!();
+        println!("  {}", dim("No active workspaces."));
+    } else {
+        sweep_workspaces(workspaces, force, dry_run, should_sync)?;
+    }
+
+    sweep_orphans(force, dry_run)?;
+    println!();
+    Ok(())
+}
+
+fn sweep_workspaces(
+    workspaces: Vec<Workspace>,
+    force: bool,
+    dry_run: bool,
+    should_sync: bool,
+) -> Result<()> {
     println!();
     println!(
         "  Checking {} workspace{}...",
@@ -125,7 +346,6 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
     if merged.is_empty() {
         println!();
         println!("  {}", dim("Nothing to clean up."));
-        println!();
         return Ok(());
     }
 
@@ -219,6 +439,5 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
         }
     }
 
-    println!();
     Ok(())
 }

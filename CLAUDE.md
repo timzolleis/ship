@@ -33,9 +33,10 @@ src/
 ├── util.rs              # resolve_path (Node path.resolve semantics), cwd_string, plural
 ├── domain/              # Pure logic — no IO, no subprocesses
 │   ├── caddyfile.rs     # Route codec + next_port allocation
+│   ├── db_orphans.rs    # Databases matching a project pattern that no workspace claims
 │   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url)
 │   ├── workspace_locate.rs  # cwd/branch-query → workspace resolution
-│   └── workspace_name.rs    # Slugging + {placeholder} pattern resolution
+│   └── workspace_name.rs    # Slugging + {placeholder} pattern resolution (both directions)
 ├── services/            # IO layer — plain module functions
 │   ├── shell.rs         # Subprocess exec (captured, interactive, sh -c in dir)
 │   ├── runner.rs        # ExecutionRuntime dispatch: local passthrough vs docker exec

@@ -90,7 +90,7 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Clean up merged-PR workspaces
+    /// Clean up merged-PR workspaces and orphaned databases
     Gc {
         #[arg(long, short = 'f')]
         force: bool,
@@ -147,7 +147,7 @@ fn help_text() -> String {
     {reset}                        Reset workspace database
     {open}   [editor|url|db]        Open editor, browser, or psql
     {index}  [project] [--all] [--dry-run]   Register pre-existing worktrees
-    {gc}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces
+    {gc}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces + orphan DBs
     {update}                        Download and install the latest release
 
   {options}

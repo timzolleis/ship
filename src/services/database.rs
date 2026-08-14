@@ -1,6 +1,7 @@
 use crate::errors::{Error, Result};
 use crate::schema::{DatabaseConfig, ExecutionRuntime};
 use crate::services::runner;
+use std::sync::mpsc;
 
 // Engine-agnostic interface speaking postgres CLI tools through the runner;
 // the runtime (local | docker) is carried per-call as target data.
@@ -44,10 +45,56 @@ pub fn clone_db(t: DbTarget, source: &str, db: &str) -> Result<()> {
         .map_err(|e| db_err("clone", db, e))
 }
 
+/// Every database on the server, one name per line.
+///
+/// Queried instead of `psql -l` because `-l` prints the ACL column, and
+/// template0/template1 wrap theirs onto a second line — a line with no
+/// database name on it at all.
+pub fn list(t: DbTarget) -> Result<Vec<String>> {
+    runner::run(
+        t.runtime,
+        "psql",
+        &["-U", t.user, "-tAc", "SELECT datname FROM pg_database ORDER BY datname"],
+    )
+    .map(|r| {
+        r.stdout
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .map_err(|e| db_err("list", "*", e))
+}
+
+/// Exact match, not a prefix — `znb_foo` must not be reported as present
+/// just because `znb_foo_bar` exists.
 pub fn exists(t: DbTarget, db: &str) -> bool {
-    runner::run(t.runtime, "psql", &["-U", t.user, "-lqt"])
-        .map(|r| r.stdout.lines().any(|line| line.trim().starts_with(db)))
-        .unwrap_or(false)
+    list(t).is_ok_and(|dbs| dbs.iter().any(|name| name == db))
+}
+
+fn size(rt: &ExecutionRuntime, user: &str, db: &str) -> Option<String> {
+    let sql = format!("SELECT pg_size_pretty(pg_database_size('{}'))", db.replace('\'', "''"));
+    runner::run(rt, "psql", &["-U", user, "-tAc", &sql])
+        .ok()
+        .map(|r| r.stdout.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// One size query per database, all in flight at once, each result sent as it
+/// lands. The index is the database's position in `dbs`. A failed query sends
+/// nothing, so the caller's placeholder cell stays as it was.
+pub fn size_stream(t: DbTarget, dbs: Vec<String>) -> mpsc::Receiver<(usize, String)> {
+    let (tx, rx) = mpsc::channel();
+    for (i, db) in dbs.into_iter().enumerate() {
+        let (tx, rt, user) = (tx.clone(), t.runtime.clone(), t.user.to_string());
+        std::thread::spawn(move || {
+            if let Some(size) = size(&rt, &user, &db) {
+                let _ = tx.send((i, size));
+            }
+        });
+    }
+    rx
 }
 
 pub fn ping(t: DbTarget) -> bool {

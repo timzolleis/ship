@@ -27,6 +27,7 @@ src/
 ├── ui/                  # Terminal widgets
 │   ├── table.rs         # Rows of cells + ANSI-aware column widths (pure)
 │   ├── picker.rs        # Single/multi list picker; cells can stream in from a background lookup
+│   ├── live.rs          # Static table whose pending cells spin until a lookup fills them
 │   └── progress.rs      # Live checklist; the running row spins, results land in place
 ├── schema.rs            # serde models: ShipConfig, ProjectConfig, Workspace, UpdateCache
 ├── util.rs              # resolve_path (Node path.resolve semantics), cwd_string, plural
@@ -61,6 +62,7 @@ src/
 - **Formatting**: import from `src/fmt.rs`. Never define local ANSI helpers. Color is dropped automatically when stdout isn't a TTY or `NO_COLOR` is set.
 - **Aligned columns**: build `ui::Row`s and let `ui::Table` measure them. It ignores ANSI codes, so cells may arrive pre-colored. Hand-rolled `{:<22}` padding breaks on long values — that's what it replaced.
 - **Slow list data**: give the row a `.pending()` cell and feed `Picker::stream` a `Receiver`. The list draws at once, a spinner holds the column, and each result swaps in. `services::github::look_up_stream` is the reference producer.
+- **Live listings**: `ui::Live` draws a table once and swaps late cells in as they land, in any order (`ship ls` + `github::look_up_stream`). Use `Progress` instead when the work is sequential steps. `Live` never truncates piped output — a pipe has no width, and cutting there drops data.
 - **Live step lists**: pair `ui::Progress` with a `*_stream` service that runs the work on a thread and sends one event per finished step (`workspace::teardown_stream`). `Progress` spins the first unfinished row, so the work must be sequential. Only steps whose output is captured may animate — `sync`'s install/migrate commands inherit stdio and would trample the table, which is why provisioning still buffers.
 - **Env rewriting**: `env.files` maps each .env path to its own vars, because one name needs different handling per package (shared postgres `DATABASE_URL` gets rewritten, a worktree-relative sqlite one is `plain`). The pre-per-file flat `autoDetected` shape still decodes by fanning every var out to every file. `ship config show` reports the stored handling with on-disk line numbers.
 - **Workspace state has three sources**: tracked files come from the git checkout, postgres from `database::clone_db`, and file-backed state (sqlite, certs, fixtures) from `copy::copy_paths` over the project's `copy` list. `init` proposes copy paths only when git ignores them — tracked files already arrive with the checkout.

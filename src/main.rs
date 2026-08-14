@@ -52,7 +52,12 @@ enum Cmd {
         db_only: bool,
     },
     /// List active workspaces
-    Ls { project: Option<String> },
+    Ls {
+        project: Option<String>,
+        /// Skip the pull-request lookup
+        #[arg(long)]
+        no_pr: bool,
+    },
     /// Start dev server + proxy
     Up {
         #[arg(long)]
@@ -216,7 +221,7 @@ fn dispatch(cmd: Cmd) {
             force,
             db_only,
         } => commands::down::run(project, branch, force, db_only),
-        Cmd::Ls { project } => commands::list::run(project),
+        Cmd::Ls { project, no_pr } => commands::list::run(project, no_pr),
         Cmd::Up { open } => commands::up::run(open),
         Cmd::Proxy { cmd } => commands::proxy::run(cmd),
         Cmd::Db { cmd } => match cmd {

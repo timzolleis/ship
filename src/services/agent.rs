@@ -33,11 +33,26 @@ pub fn cleanup_enabled() -> bool {
 
 /// Every session directory across every installed harness.
 pub fn list() -> Vec<SessionDir> {
-    let home = config::home_dir();
+    list_in(Path::new(&config::home_dir()))
+}
+
+/// Two stores can be the same directory — `~/.Claude Code` is a symlink to
+/// `~/.pi` wherever Pi is installed under the Claude Code brand. Roots are
+/// resolved before reading so a session is never listed twice; the harness of
+/// the first store in `STORES` wins.
+fn list_in(home: &Path) -> Vec<SessionDir> {
     let mut found = Vec::new();
+    let mut scanned: Vec<PathBuf> = Vec::new();
 
     for (relative, harness) in STORES {
-        let root = Path::new(&home).join(relative);
+        let root = home.join(relative);
+        let Ok(real) = fs::canonicalize(&root) else {
+            continue;
+        };
+        if scanned.contains(&real) {
+            continue;
+        }
+        scanned.push(real);
         let Ok(entries) = fs::read_dir(&root) else {
             continue;
         };
@@ -118,4 +133,41 @@ pub fn orphans(prefixes: &[WorktreePrefix]) -> Vec<SessionDir> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ship-agent-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // `~/.Claude Code` -> `~/.pi` is how Pi installs under the Claude Code
+    // brand. Both stores read the same directory, so the session behind them
+    // must still be listed once.
+    #[test]
+    fn symlinked_stores_are_scanned_once() {
+        let home = tmp("symlink");
+        fs::create_dir_all(home.join(".pi/agent/sessions/-Users-tim-code-app")).unwrap();
+        std::os::unix::fs::symlink(home.join(".pi"), home.join(".Claude Code")).unwrap();
+
+        let found = list_in(&home);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].harness, "Pi");
+    }
+
+    #[test]
+    fn separate_stores_are_both_scanned() {
+        let home = tmp("separate");
+        fs::create_dir_all(home.join(".pi/agent/sessions/-Users-tim-code-app")).unwrap();
+        fs::create_dir_all(home.join(".claude/projects/-Users-tim-code-app")).unwrap();
+
+        let mut harnesses: Vec<&str> = list_in(&home).iter().map(|d| d.harness).collect();
+        harnesses.sort_unstable();
+        assert_eq!(harnesses, ["Claude Code", "Pi"]);
+    }
 }

@@ -390,16 +390,6 @@ pub fn teardown_steps(opts: &TeardownOptions) -> Vec<TeardownStep> {
     steps
 }
 
-pub fn teardown(
-    ws: &Workspace,
-    pc: &ProjectConfig,
-    opts: &TeardownOptions,
-) -> Vec<StepEvent<TeardownStep>> {
-    let mut events = Vec::new();
-    teardown_each(ws, pc, opts, |e| events.push(e));
-    events
-}
-
 /// Teardown on a worker thread, one event per finished step. The caller keeps
 /// its terminal free to animate while `git` and `dropdb` run.
 pub fn teardown_stream(

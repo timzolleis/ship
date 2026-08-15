@@ -1,3 +1,4 @@
+use crate::commands::teardown;
 use crate::domain::workspace_locate::locate_workspace;
 use crate::errors::Result;
 use crate::fmt::{bold, dim, green, red, yellow};
@@ -5,69 +6,30 @@ use crate::prompt;
 use crate::schema::{ProjectConfig, Workspace};
 use crate::services::config;
 use crate::services::github;
-use crate::services::workspace::{
-    teardown_steps, teardown_stream, Status, StepEvent, TeardownOptions, TeardownStep,
-};
-use crate::ui::{Finished, Outcome, Picker, Progress, Row, Table, Update};
+use crate::services::workspace::TeardownOptions;
+use crate::ui::{Picker, Row, Table, Update};
 use crate::util::{cwd_string, plural};
 
 // ---------------------------------------------------------------------------
 // ship down [project] [branch] [--force] [--db-only]
 // ---------------------------------------------------------------------------
 
-fn step_name(s: TeardownStep) -> &'static str {
-    match s {
-        TeardownStep::ProxyRoute => "Proxy route",
-        TeardownStep::Database => "Database",
-        TeardownStep::Worktree => "Worktree",
-        TeardownStep::Branch => "Branch",
-        TeardownStep::RemoteBranch => "Remote branch",
-        TeardownStep::AgentSessions => "Agent sessions",
-    }
-}
-
-/// Wording for a finished step. A bare "done" adds nothing next to the ✓, so
-/// only the surprises get text.
-fn finished(order: &[TeardownStep], e: StepEvent<TeardownStep>) -> Finished {
-    let row = order.iter().position(|s| *s == e.step).unwrap_or(0);
-    match e.status {
-        Status::Done => Finished::new(row, Outcome::Done, e.detail),
-        Status::SkippedExisting => Finished::new(
-            row,
-            Outcome::Skipped,
-            Some(e.detail.unwrap_or_else(|| "nothing to clear".to_string())),
-        ),
-        Status::Warning => Finished::new(
-            row,
-            Outcome::Warning,
-            Some(e.detail.unwrap_or_else(|| "failed".to_string())),
-        ),
-    }
-}
-
-/// Tear down a workspace, then drop its registry entry. The checklist draws
-/// before the work starts and each step lands in place.
 /// down's option mapping: remove_worktree = !db_only, delete_remote_branch = false.
 pub fn tear_down_workspace(
     workspace: &Workspace,
     project_config: &ProjectConfig,
     db_only: bool,
     force: bool,
-) -> Result<()> {
-    let opts = TeardownOptions {
-        remove_worktree: !db_only,
-        force,
-        delete_remote_branch: false,
-    };
-    let order = teardown_steps(&opts);
-    let rows = order
-        .iter()
-        .map(|s| Row::new(*s, [step_name(*s).to_string()]))
-        .collect();
-    let events = teardown_stream(workspace.clone(), project_config.clone(), opts);
-
-    Progress::new(rows).run(events, move |e| finished(&order, e))?;
-    config::remove_workspace(&workspace.project, &workspace.branch)
+) -> Result<bool> {
+    teardown::run(
+        workspace,
+        project_config,
+        TeardownOptions {
+            remove_worktree: !db_only,
+            force,
+            delete_remote_branch: false,
+        },
+    )
 }
 
 pub fn run(project: Option<String>, branch: Option<String>, force: bool, db_only: bool) {
@@ -219,11 +181,17 @@ fn run_inner(
     for Target { ws, .. } in &targets {
         println!();
         println!("  {}", bold(format!("{}/{}", ws.project, ws.branch)));
-        let result = config::get_project(&ws.project)
-            .and_then(|pc| tear_down_workspace(ws, &pc, db_only, force));
-        if let Err(e) = result {
-            failures.push((format!("{}/{}", ws.project, ws.branch), e.to_string()));
-            println!("  {} {}", red("✗"), dim(e.to_string()));
+        let name = format!("{}/{}", ws.project, ws.branch);
+        match config::get_project(&ws.project)
+            .and_then(|pc| tear_down_workspace(ws, &pc, db_only, force))
+        {
+            Ok(true) => {}
+            // The checklist already showed which step broke; say what it cost.
+            Ok(false) => failures.push((name, "kept in the registry".to_string())),
+            Err(e) => {
+                println!("  {} {}", red("✗"), dim(e.to_string()));
+                failures.push((name, e.to_string()));
+            }
         }
     }
 

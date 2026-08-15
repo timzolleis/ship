@@ -11,5 +11,6 @@ pub mod projects;
 pub mod proxy;
 pub mod reset;
 pub mod sync;
+pub mod teardown;
 pub mod up;
 pub mod update;

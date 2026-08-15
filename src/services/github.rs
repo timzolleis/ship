@@ -1,5 +1,5 @@
 use crate::fmt::{blue, dim, green, yellow};
-use crate::schema::{ProjectConfig, Workspace};
+use crate::schema::Workspace;
 use crate::services::{config, shell};
 use serde::Deserialize;
 use std::sync::mpsc;
@@ -66,16 +66,14 @@ pub fn pr_label(pr: Option<&Pr>) -> String {
 }
 
 pub struct WorkspacePr {
-    pub project_config: Option<ProjectConfig>,
     pub pr: Option<Pr>,
 }
 
 fn look_up(ws: &Workspace) -> WorkspacePr {
-    let project_config = config::get_project(&ws.project).ok();
-    let pr = project_config
-        .as_ref()
+    let pr = config::get_project(&ws.project)
+        .ok()
         .and_then(|pc| pr_for_branch(&pc.path, &ws.branch));
-    WorkspacePr { project_config, pr }
+    WorkspacePr { pr }
 }
 
 /// Same lookups as `look_up_all`, but each result arrives as it finishes so a

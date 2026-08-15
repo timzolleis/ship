@@ -1,3 +1,4 @@
+use crate::commands::teardown as teardown_ui;
 use crate::domain::db_orphans::{self, OrphanQuery};
 use crate::domain::workspace_name::resolve_pattern;
 use crate::errors::Result;
@@ -7,81 +8,46 @@ use crate::schema::{ProjectConfig, Workspace};
 use crate::services::agent::{self, SessionDir, WorktreePrefix};
 use crate::services::database::{self, DbTarget};
 use crate::services::github::{self, Pr};
-use crate::services::workspace::{teardown, TeardownOptions};
+use crate::services::workspace::TeardownOptions;
 use crate::services::{config, sync};
 use crate::ui::{Picker, Row, Table, Update};
 use crate::util::{plural, resolve_path};
 use indexmap::IndexMap;
-use std::collections::HashSet;
 use std::sync::mpsc;
 
 // ---------------------------------------------------------------------------
-// ship gc [--force] [--dry-run] [--sync]
+// ship gc [--force] [--dry-run] [--sync] | --databases | --sessions
 // ---------------------------------------------------------------------------
 
+/// gc tears down harder than `down` does: the branch is merged, so the remote
+/// branch goes too and nothing prompts about dirty state.
+const GC_TEARDOWN: TeardownOptions = TeardownOptions {
+    remove_worktree: true,
+    force: true,
+    delete_remote_branch: true,
+};
+
+#[derive(Clone)]
 struct Checked {
     ws: Workspace,
-    project_config: Option<ProjectConfig>,
-    pr: Option<Pr>,
     pr_label: String,
+    merged: bool,
 }
 
-/// Tear down each cleaned workspace (worktree + branch + remote branch,
-/// forced), then write the workspace registry exactly once to avoid
-/// read-modify-write races. Returns the number removed from the registry.
-fn gc_cleanup(to_clean: &[&Checked]) -> Result<usize> {
-    for c in to_clean {
-        if let Some(pc) = &c.project_config {
-            let _ = teardown(
-                &c.ws,
-                pc,
-                &TeardownOptions {
-                    remove_worktree: true,
-                    force: true,
-                    delete_remote_branch: true,
-                },
-            );
-        }
-    }
-
-    if to_clean.is_empty() {
-        return Ok(0);
-    }
-
-    let removed: HashSet<(String, String)> = to_clean
-        .iter()
-        .map(|c| (c.ws.project.clone(), c.ws.branch.clone()))
-        .collect();
-    let current = config::load_workspaces()?;
-    let filtered: Vec<Workspace> = current
-        .into_iter()
-        .filter(|w| !removed.contains(&(w.project.clone(), w.branch.clone())))
-        .collect();
-    config::save_workspaces(&filtered)?;
-    Ok(to_clean.len())
-}
-
-/// `<project>  <branch>  PR #42 merged 2d ago  → keep`. The verdict is last,
-/// so measuring the table before verdicts are known still lines up.
-fn row(c: &Checked, verdict: &str) -> Row<()> {
+/// `<project>  <branch>  PR #42 merged 2d ago`
+fn row(c: &Checked) -> Row<Checked> {
     Row::new(
-        (),
-        [
-            dim(&c.ws.project),
-            bold(&c.ws.branch),
-            c.pr_label.clone(),
-            format!("→ {verdict}"),
-        ],
+        c.clone(),
+        [dim(&c.ws.project), bold(&c.ws.branch), c.pr_label.clone()],
     )
+    .checked(c.merged)
 }
 
-fn line(table: &Table, c: &Checked, verdict: &str) -> String {
-    format!("  {}", table.line(&row(c, verdict), ""))
-}
-
-pub fn run(force: bool, dry_run: bool, should_sync: bool, sessions_only: bool) {
+pub fn run(force: bool, dry_run: bool, should_sync: bool, sessions_only: bool, databases: bool) {
     let result = if sessions_only {
         sweep_sessions(force, dry_run).inspect(|()| println!())
+    } else if databases {
+        sweep_orphans(force, dry_run).inspect(|()| println!())
     } else {
         run_inner(force, dry_run, should_sync)
     };
@@ -305,22 +271,22 @@ fn pick_orphans(
     Ok(picked.into_iter().map(|r| r.value).collect())
 }
 
-/// gc makes these itself: `gc_cleanup` swallows teardown errors, so a drop
-/// that failed still loses its registry entry. Runs after cleanup so a failure
-/// from this same run is caught.
+/// Databases left behind by a teardown that never finished, or by a workspace
+/// removed outside ship. Its own mode because it pings every project's server,
+/// which is too slow to pay for on every `ship gc`.
 fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
     let projects = config::load_config()?.projects;
     let Scan { orphans, skipped } = collect_orphans(&projects)?;
-
-    if orphans.is_empty() && skipped.is_empty() {
-        return Ok(());
-    }
 
     println!();
     for warning in &skipped {
         println!("  {} {}", yellow("⚠"), warning);
     }
     if orphans.is_empty() {
+        if !skipped.is_empty() {
+            println!();
+        }
+        println!("  {}", dim("No orphaned databases."));
         return Ok(());
     }
     if !skipped.is_empty() {
@@ -388,19 +354,25 @@ fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
 
 fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
     let workspaces = config::load_workspaces()?;
-
-    // An empty registry is not an early exit — that is exactly the state where
-    // orphaned databases pile up.
     if workspaces.is_empty() {
         println!();
         println!("  {}", dim("No active workspaces."));
-    } else {
-        sweep_workspaces(workspaces, force, dry_run, should_sync)?;
+        println!();
+        return Ok(());
     }
-
-    sweep_orphans(force, dry_run)?;
+    sweep_workspaces(workspaces, force, dry_run, should_sync)?;
     println!();
     Ok(())
+}
+
+/// Merged rows come up checked, everything else unchecked but still listed —
+/// a workspace whose PR is still open is fair game if you say so.
+fn pick_workspaces(checked: &[Checked]) -> Result<Vec<Checked>> {
+    let rows: Vec<Row<Checked>> = checked.iter().map(row).collect();
+    let picked = Picker::new("Select workspaces to tear down", rows)
+        .multi()
+        .interact()?;
+    Ok(picked.into_iter().map(|r| r.value).collect())
 }
 
 fn sweep_workspaces(
@@ -416,98 +388,119 @@ fn sweep_workspaces(
         plural(workspaces.len())
     );
 
-    // Phase 1: check all PR statuses in parallel (gh pr view per workspace).
+    // The verdict is the preselection, so every PR must be known before the
+    // picker opens — no streaming here, unlike `ship down`.
     let checked: Vec<Checked> = github::look_up_all(&workspaces)
         .into_iter()
         .zip(workspaces.iter().cloned())
         .map(|(looked_up, ws)| Checked {
             ws,
-            project_config: looked_up.project_config,
             pr_label: github::pr_label(looked_up.pr.as_ref()),
-            pr: looked_up.pr,
+            merged: looked_up.pr.as_ref().map(Pr::is_merged).unwrap_or(false),
         })
         .collect();
 
-    println!();
+    let merged: Vec<Checked> = checked.iter().filter(|c| c.merged).cloned().collect();
 
-    // Phase 2: display results and prompt for cleanup.
-    let is_merged = |c: &&Checked| c.pr.as_ref().map(Pr::is_merged).unwrap_or(false);
-    let merged: Vec<&Checked> = checked.iter().filter(is_merged).collect();
-    let kept: Vec<&Checked> = checked.iter().filter(|c| !is_merged(c)).collect();
-
-    let all_rows: Vec<Row<()>> = checked.iter().map(|c| row(c, "")).collect();
-    let table = Table::measure(&all_rows);
-
-    for c in &kept {
-        println!("{}", line(&table, c, &dim("keep")));
+    if dry_run {
+        println!();
+        // The verdict is a column of its own so the PR labels above it stay padded.
+        let rows: Vec<Row<()>> = checked
+            .iter()
+            .map(|c| {
+                let verdict = if c.merged {
+                    yellow("would tear down")
+                } else {
+                    dim("keep")
+                };
+                Row::new(
+                    (),
+                    [
+                        dim(&c.ws.project),
+                        bold(&c.ws.branch),
+                        c.pr_label.clone(),
+                        format!("→ {verdict}"),
+                    ],
+                )
+            })
+            .collect();
+        let table = Table::measure(&rows);
+        for r in &rows {
+            println!("  {}", table.line(r, ""));
+        }
+        println!();
+        if merged.is_empty() {
+            println!("  {}", dim("Nothing to clean up."));
+        } else {
+            println!(
+                "  {} would clean up {} workspace{}.",
+                green("✓"),
+                merged.len(),
+                plural(merged.len())
+            );
+        }
+        return Ok(());
     }
 
-    let cleaned: usize;
+    let to_clean = if force {
+        if merged.is_empty() {
+            println!();
+            println!("  {}", dim("Nothing to clean up."));
+            return Ok(());
+        }
+        merged
+    } else {
+        pick_workspaces(&checked)?
+    };
 
-    if merged.is_empty() {
+    if to_clean.is_empty() {
         println!();
         println!("  {}", dim("Nothing to clean up."));
         return Ok(());
     }
 
-    if dry_run {
-        for c in &merged {
-            println!("{}", line(&table, c, &yellow("would tear down")));
-        }
-        cleaned = merged.len();
-    } else {
-        // Collect approvals serially (prompts must be sequential) before any teardown.
-        let to_clean: Vec<&Checked> = if force {
-            merged.clone()
-        } else {
-            let mut approved = Vec::new();
-            for c in &merged {
-                let ok = prompt::confirm(
-                    &format!(
-                        "{}/{} — {}. Tear down?",
-                        c.ws.project, c.ws.branch, c.pr_label
-                    ),
-                    false,
-                )?;
-                if ok {
-                    approved.push(*c);
-                } else {
-                    println!("{}", line(&table, c, &dim("skipped")));
-                }
+    // One failure must not strand the rest — report it and carry on.
+    let total = to_clean.len();
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for c in &to_clean {
+        println!();
+        println!("  {}", bold(format!("{}/{}", c.ws.project, c.ws.branch)));
+        let name = format!("{}/{}", c.ws.project, c.ws.branch);
+        match config::get_project(&c.ws.project)
+            .and_then(|pc| teardown_ui::run(&c.ws, &pc, GC_TEARDOWN))
+        {
+            Ok(true) => {}
+            // The checklist already showed which step broke; say what it cost.
+            Ok(false) => failures.push((name, "kept in the registry".to_string())),
+            Err(e) => {
+                println!("  {} {}", red("✗"), dim(e.to_string()));
+                failures.push((name, e.to_string()));
             }
-            approved
-        };
-
-        cleaned = gc_cleanup(&to_clean)?;
-
-        for c in &to_clean {
-            println!("{}", line(&table, c, &green("cleaned up")));
         }
     }
 
+    let cleaned = total - failures.len();
     println!();
-    if cleaned > 0 {
-        let verb = if dry_run {
-            "would clean up"
-        } else {
-            "cleaned up"
-        };
-        println!(
-            "  {} {} {} workspace{}.",
-            green("✓"),
-            verb,
-            cleaned,
-            plural(cleaned)
-        );
-    } else {
-        println!("  {}", dim("Nothing to clean up."));
+    for (name, err) in &failures {
+        println!("  {} {} {}", yellow("⚠"), name, dim(err));
     }
+    println!(
+        "  {} Cleaned up {} of {} workspace{}.",
+        if failures.is_empty() {
+            green("✓")
+        } else {
+            yellow("⚠")
+        },
+        cleaned,
+        total,
+        plural(total)
+    );
 
     // Sync unique projects after cleanup.
-    if should_sync && !dry_run && cleaned > 0 {
+    if should_sync && cleaned > 0 {
         let mut projects: Vec<String> = Vec::new();
-        for c in &merged {
-            if c.project_config.is_some() && !projects.contains(&c.ws.project) {
+        for c in &to_clean {
+            if !projects.contains(&c.ws.project) {
                 projects.push(c.ws.project.clone());
             }
         }

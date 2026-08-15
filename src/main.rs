@@ -90,7 +90,7 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Clean up merged-PR workspaces and orphaned databases
+    /// Clean up workspaces whose PR is merged
     Gc {
         #[arg(long, short = 'f')]
         force: bool,
@@ -98,9 +98,12 @@ enum Cmd {
         dry_run: bool,
         #[arg(long, short = 's')]
         sync: bool,
-        /// Sweep orphaned agent sessions instead of workspaces and databases
-        #[arg(long)]
+        /// Sweep orphaned agent sessions instead of workspaces
+        #[arg(long, conflicts_with = "databases")]
         sessions: bool,
+        /// Sweep orphaned databases instead of workspaces
+        #[arg(long)]
+        databases: bool,
     },
     /// Download and install the latest release
     Update,
@@ -151,7 +154,8 @@ fn help_text() -> String {
     {reset}                        Reset workspace database
     {open}   [editor|url|db]        Open editor, browser, or psql
     {index}  [project] [--all] [--dry-run]   Register pre-existing worktrees
-    {gc}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces + orphan DBs
+    {gc}     [--force] [--dry-run] [--sync]  Clean up workspaces whose PR is merged
+    {gc}     --databases            Clean up databases no workspace claims
     {gc}     --sessions             Clean up agent sessions with no worktree left
     {update}                        Download and install the latest release
 
@@ -247,7 +251,8 @@ fn dispatch(cmd: Cmd) {
             dry_run,
             sync,
             sessions,
-        } => commands::gc::run(force, dry_run, sync, sessions),
+            databases,
+        } => commands::gc::run(force, dry_run, sync, sessions, databases),
         Cmd::Update => commands::update::run(),
         Cmd::RefreshUpdateCache => {
             let _ = services::updater::refresh_cache();

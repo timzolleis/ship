@@ -230,15 +230,10 @@ impl<T> Picker<T> {
             } else {
                 " ".to_string()
             };
-            let mark = match (self.multi, row.checked) {
-                (false, _) => String::new(),
-                (true, true) => green("[x] "),
-                (true, false) => dim("[ ] "),
-            };
             lines.push(format!(
                 "  {} {}{}",
                 pointer,
-                mark,
+                self.mark(row.checked),
                 table.line(row, spinner)
             ));
         }
@@ -259,6 +254,14 @@ impl<T> Picker<T> {
         Ok(lines.len())
     }
 
+    fn mark(&self, checked: bool) -> String {
+        match (self.multi, checked) {
+            (false, _) => String::new(),
+            (true, true) => green("[x] "),
+            (true, false) => dim("[ ] "),
+        }
+    }
+
     fn help(&self) -> &'static str {
         if self.multi {
             "↑↓ move · space select · a all · enter confirm · esc cancel"
@@ -273,7 +276,11 @@ impl<T> Picker<T> {
         let table = Table::measure(&self.rows);
         io(term.write_line(&format!("  {}", bold(&self.msg))))?;
         for row in &self.rows {
-            io(term.write_line(&format!("    {}", table.line(row, "…"))))?;
+            io(term.write_line(&format!(
+                "    {}{}",
+                self.mark(row.checked),
+                table.line(row, "…")
+            )))?;
         }
         Ok(())
     }

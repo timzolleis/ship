@@ -22,7 +22,7 @@ fn step_name(s: TeardownStep) -> &'static str {
         TeardownStep::Worktree => "Worktree",
         TeardownStep::Branch => "Branch",
         TeardownStep::RemoteBranch => "Remote branch",
-        TeardownStep::ClaudeConvos => "Claude convos",
+        TeardownStep::AgentSessions => "Agent sessions",
     }
 }
 

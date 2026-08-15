@@ -35,6 +35,7 @@ src/
 │   ├── caddyfile.rs     # Route codec + next_port allocation
 │   ├── db_orphans.rs    # Databases matching a project pattern that no workspace claims
 │   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url)
+│   ├── session_slug.rs  # Agent session dir name ↔ path (a `-` is a literal or a `/`)
 │   ├── workspace_locate.rs  # cwd/branch-query → workspace resolution
 │   └── workspace_name.rs    # Slugging + {placeholder} pattern resolution (both directions)
 ├── services/            # IO layer — plain module functions
@@ -48,7 +49,7 @@ src/
 │   ├── proxy.rs         # Caddy reverse proxy via docker
 │   ├── editor.rs        # Detect & open editors ($VISUAL/$EDITOR → GUI apps → terminal)
 │   ├── env.rs           # .env file copying/patching (delegates rewriting to domain)
-│   ├── claude.rs        # Clears ~/.claude/projects/<slug>/ on teardown
+│   ├── agent.rs         # Agent session stores: list, remove for a path, find orphans
 │   ├── sync.rs          # Fetch + ff-pull base checkout, install/generate/migrate on HEAD move
 │   ├── updater.rs       # GitHub-release self-update + background version-check cache
 │   └── workspace.rs     # Orchestrator: provision / teardown / reset state machines
@@ -66,6 +67,7 @@ src/
 - **Live listings**: `ui::Live` draws a table once and swaps late cells in as they land, in any order (`ship ls` + `github::look_up_stream`). Use `Progress` instead when the work is sequential steps. `Live` never truncates piped output — a pipe has no width, and cutting there drops data.
 - **Live step lists**: pair `ui::Progress` with a `*_stream` service that runs the work on a thread and sends one event per finished step (`workspace::teardown_stream`). `Progress` spins the first unfinished row, so the work must be sequential. Only steps whose output is captured may animate — `sync`'s install/migrate commands inherit stdio and would trample the table, which is why provisioning still buffers.
 - **Env rewriting**: `env.files` maps each .env path to its own vars, because one name needs different handling per package (shared postgres `DATABASE_URL` gets rewritten, a worktree-relative sqlite one is `plain`). The pre-per-file flat `autoDetected` shape still decodes by fanning every var out to every file. `ship config show` reports the stored handling with on-disk line numbers.
+- **Agent sessions**: every harness stores transcripts in one dir per project path, flattening `/` to `-` — `services::agent::STORES` lists the roots. The flattening is lossy, so a name only proves which path it means when that path exists: `session_slug::resolve` tries each `-` both ways and prunes against the filesystem. `gc --sessions` only considers names under a project's worktree prefix and only deletes ones no live path claims. Teardown skips the step when `deleteAgentSessions` is false.
 - **Workspace state has three sources**: tracked files come from the git checkout, postgres from `database::clone_db`, and file-backed state (sqlite, certs, fixtures) from `copy::copy_paths` over the project's `copy` list. `init` proposes copy paths only when git ignores them — tracked files already arrive with the checkout.
 - **Prompts**: through `src/prompt.rs` only (it strips trailing `:` — dialoguer adds its own). Reach for `ui::Picker` directly only when a list needs streaming cells or the picked row's cells.
 - **Editor opening**: always `editor::open()`, never exec an editor directly.
@@ -83,7 +85,7 @@ All state lives in `~/.config/ship/`:
 
 | File | Contents |
 |------|----------|
-| `config.json` | Projects, editor pref, autoOpenEditor |
+| `config.json` | Projects, editor pref, autoOpenEditor, deleteAgentSessions |
 | `workspaces.json` | Active workspace entries |
 | `update-cache.json` | Last release check (refreshed by hidden `__refresh-update-cache` worker) |
 | `Caddyfile` | Caddy reverse proxy routes |

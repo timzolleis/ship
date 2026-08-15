@@ -204,6 +204,9 @@ pub struct ShipConfig {
     /// Auto-open editor after ship create. None = ask first time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_open_editor: Option<bool>,
+    /// Delete agent transcripts with the worktree. None = on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_agent_sessions: Option<bool>,
     #[serde(default)]
     pub projects: IndexMap<String, ProjectConfig>,
 }

@@ -7,7 +7,7 @@ use crate::services::database::{self, DbTarget};
 use crate::services::env::{self, PatchResult};
 use crate::services::shell::{self, NON_INTERACTIVE_ENV};
 use crate::services::sync::{self, SyncResult};
-use crate::services::{claude, config, git, proxy};
+use crate::services::{agent, config, git, proxy};
 use crate::util::resolve_path;
 use std::sync::mpsc;
 
@@ -114,7 +114,7 @@ pub enum TeardownStep {
     Worktree,
     Branch,
     RemoteBranch,
-    ClaudeConvos,
+    AgentSessions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -383,7 +383,9 @@ pub fn teardown_steps(opts: &TeardownOptions) -> Vec<TeardownStep> {
         if opts.delete_remote_branch {
             steps.push(TeardownStep::RemoteBranch);
         }
-        steps.push(TeardownStep::ClaudeConvos);
+        if agent::cleanup_enabled() {
+            steps.push(TeardownStep::AgentSessions);
+        }
     }
     steps
 }
@@ -468,11 +470,17 @@ fn teardown_each(
             });
         }
 
-        emit(if claude::remove_project_convo(&ws.path) {
-            step(TeardownStep::ClaudeConvos, Status::Done, None)
-        } else {
-            step(TeardownStep::ClaudeConvos, Status::SkippedExisting, None)
-        });
+        if agent::cleanup_enabled() {
+            let removed = agent::remove_sessions_for(&ws.path);
+            emit(match removed {
+                0 => step(TeardownStep::AgentSessions, Status::SkippedExisting, None),
+                n => step(
+                    TeardownStep::AgentSessions,
+                    Status::Done,
+                    Some(format!("{n} store{}", crate::util::plural(n))),
+                ),
+            });
+        }
     }
 }
 

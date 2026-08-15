@@ -1,4 +1,4 @@
-pub mod claude;
+pub mod agent;
 pub mod config;
 pub mod copy;
 pub mod database;

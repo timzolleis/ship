@@ -13,6 +13,17 @@ pub enum ConfigCmd {
         #[arg(long, short = 'a')]
         all: bool,
     },
+    /// Delete agent transcripts when a workspace is torn down
+    Sessions {
+        /// Omit to print the current setting
+        state: Option<Toggle>,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq)]
+pub enum Toggle {
+    On,
+    Off,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,11 +103,36 @@ impl LineMap {
 pub fn run(cmd: Option<ConfigCmd>) {
     let result = match cmd {
         Some(ConfigCmd::Show { alias, all }) => show(alias, all),
+        Some(ConfigCmd::Sessions { state }) => sessions(state),
         None => show(None, false),
     };
     if let Err(e) = result {
         eprintln!("\n  {} {}\n", red("Error:"), e);
     }
+}
+
+/// Read or write the agent-session toggle. Reading prints where the setting
+/// stands; writing prints what it now does, since the effect is invisible
+/// until the next teardown.
+fn sessions(state: Option<Toggle>) -> Result<()> {
+    let mut config = config::load_config()?;
+    if let Some(state) = state {
+        config.delete_agent_sessions = Some(state == Toggle::On);
+        config::save_config(&config)?;
+    }
+
+    println!();
+    if config.delete_agent_sessions.unwrap_or(true) {
+        println!(
+            "  {} Agent sessions are deleted with the workspace.",
+            green("✓")
+        );
+    } else {
+        println!("  {} Agent sessions are kept.", yellow("·"));
+        println!("  {}", dim("Clear the leftovers with: ship gc --sessions"));
+    }
+    println!();
+    Ok(())
 }
 
 fn show(alias: Option<String>, all: bool) -> Result<()> {

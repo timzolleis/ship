@@ -98,6 +98,9 @@ enum Cmd {
         dry_run: bool,
         #[arg(long, short = 's')]
         sync: bool,
+        /// Sweep orphaned agent sessions instead of workspaces and databases
+        #[arg(long)]
+        sessions: bool,
     },
     /// Download and install the latest release
     Update,
@@ -119,6 +122,7 @@ fn help_text() -> String {
     {init} --alias ep ...           Non-interactive with flags
     {projects}                      List registered projects
     {config_show} [alias] [--all]   Show stored config with file path + lines
+    {config_sessions} [on|off]   Delete agent sessions on teardown
 
   {lifecycle}
     {create} [project] [branch]     Create or resume a workspace
@@ -148,6 +152,7 @@ fn help_text() -> String {
     {open}   [editor|url|db]        Open editor, browser, or psql
     {index}  [project] [--all] [--dry-run]   Register pre-existing worktrees
     {gc}     [--force] [--dry-run] [--sync]  Clean up merged-PR workspaces + orphan DBs
+    {gc}     --sessions             Clean up agent sessions with no worktree left
     {update}                        Download and install the latest release
 
   {options}
@@ -168,6 +173,7 @@ fn help_text() -> String {
         init = blue("init"),
         projects = blue("projects"),
         config_show = blue("config show"),
+        config_sessions = blue("config sessions"),
         lifecycle = bold("Workspace Lifecycle"),
         create = blue("create"),
         down = blue("down"),
@@ -240,7 +246,8 @@ fn dispatch(cmd: Cmd) {
             force,
             dry_run,
             sync,
-        } => commands::gc::run(force, dry_run, sync),
+            sessions,
+        } => commands::gc::run(force, dry_run, sync, sessions),
         Cmd::Update => commands::update::run(),
         Cmd::RefreshUpdateCache => {
             let _ = services::updater::refresh_cache();

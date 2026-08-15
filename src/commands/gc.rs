@@ -4,12 +4,13 @@ use crate::errors::Result;
 use crate::fmt::{bold, dim, green, red, yellow};
 use crate::prompt;
 use crate::schema::{ProjectConfig, Workspace};
+use crate::services::agent::{self, SessionDir, WorktreePrefix};
 use crate::services::database::{self, DbTarget};
 use crate::services::github::{self, Pr};
 use crate::services::workspace::{teardown, TeardownOptions};
 use crate::services::{config, sync};
 use crate::ui::{Picker, Row, Table, Update};
-use crate::util::plural;
+use crate::util::{plural, resolve_path};
 use indexmap::IndexMap;
 use std::collections::HashSet;
 use std::sync::mpsc;
@@ -78,10 +79,110 @@ fn line(table: &Table, c: &Checked, verdict: &str) -> String {
     format!("  {}", table.line(&row(c, verdict), ""))
 }
 
-pub fn run(force: bool, dry_run: bool, should_sync: bool) {
-    if let Err(e) = run_inner(force, dry_run, should_sync) {
+pub fn run(force: bool, dry_run: bool, should_sync: bool, sessions_only: bool) {
+    let result = if sessions_only {
+        sweep_sessions(force, dry_run).inspect(|()| println!())
+    } else {
+        run_inner(force, dry_run, should_sync)
+    };
+    if let Err(e) = result {
         eprintln!("\n  {} {}\n", red("Error:"), e);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned agent sessions — transcripts under a project's worktree directory
+// whose path is gone
+// ---------------------------------------------------------------------------
+
+/// Everything a worktree path for this project starts with: the dir pattern up
+/// to its first placeholder, resolved against the project root.
+fn worktree_prefix(alias: &str, pc: &ProjectConfig) -> WorktreePrefix {
+    let pattern = resolve_pattern(&pc.worktree.dir_pattern, &[("project", alias)]);
+    let head = pattern.split('{').next().unwrap_or_default();
+    WorktreePrefix::new(&resolve_path(&pc.path, head))
+}
+
+fn session_row(s: &SessionDir) -> Row<SessionDir> {
+    Row::new(s.clone(), [dim(s.harness), bold(&s.name)])
+}
+
+fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
+    let projects = config::load_config()?.projects;
+    let prefixes: Vec<WorktreePrefix> = projects
+        .iter()
+        .map(|(alias, pc)| worktree_prefix(alias, pc))
+        .collect();
+    let orphans = agent::orphans(&prefixes);
+
+    println!();
+    if orphans.is_empty() {
+        println!("  {}", dim("No orphaned agent sessions."));
+        return Ok(());
+    }
+
+    let count = orphans.len();
+    println!(
+        "  {} orphaned agent session{} \u{2014} {}.",
+        count,
+        plural(count),
+        if count == 1 {
+            "its worktree is gone"
+        } else {
+            "their worktrees are gone"
+        }
+    );
+    println!();
+
+    let rows: Vec<Row<SessionDir>> = orphans.iter().map(session_row).collect();
+    if dry_run {
+        let table = Table::measure(&rows);
+        for r in &rows {
+            println!("  {} {}", table.line(r, ""), yellow("→ would delete"));
+        }
+        return Ok(());
+    }
+
+    let picked: Vec<SessionDir> = if force {
+        orphans
+    } else {
+        Picker::new("Select sessions to delete", rows)
+            .multi()
+            .interact()?
+            .into_iter()
+            .map(|r| r.value)
+            .collect()
+    };
+    if picked.is_empty() {
+        println!("  Cancelled.");
+        return Ok(());
+    }
+
+    let n = picked.len();
+    if !force && !prompt::confirm(&format!("Delete {} session{}?", n, plural(n)), false)? {
+        println!("  Cancelled.");
+        return Ok(());
+    }
+
+    let mut deleted = 0;
+    for s in &picked {
+        if agent::remove(s) {
+            deleted += 1;
+            println!("  {} Deleted {} {}", green("✓"), s.name, dim(s.harness));
+        } else {
+            println!("  {} {} {}", yellow("⚠"), s.name, dim("could not delete"));
+        }
+    }
+
+    println!();
+    println!(
+        "  {} Deleted {} of {} session{}.",
+        if deleted == n { green("✓") } else { yellow("⚠") },
+        deleted,
+        n,
+        plural(n)
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,9 @@ enum Cmd {
         force: bool,
         #[arg(long)]
         db_only: bool,
+        /// Delete the remote branch regardless of pull-request state
+        #[arg(long, conflicts_with = "db_only")]
+        remote: bool,
     },
     /// List active workspaces
     Ls {
@@ -104,6 +107,9 @@ enum Cmd {
         /// Sweep orphaned databases instead of workspaces
         #[arg(long)]
         databases: bool,
+        /// Delete remote branches regardless of pull-request state
+        #[arg(long, conflicts_with_all = ["sessions", "databases"])]
+        remote: bool,
     },
     /// Download and install the latest release
     Update,
@@ -129,7 +135,7 @@ fn help_text() -> String {
 
   {lifecycle}
     {create} [project] [branch]     Create or resume a workspace
-    {down}   [project] [branch]     Tear down a workspace
+    {down}   [project] [branch] [--remote]   Tear down a workspace
     {ls}     [project]              List active workspaces
 
   {dev_server}
@@ -154,7 +160,7 @@ fn help_text() -> String {
     {reset}                        Reset workspace database
     {open}   [editor|url|db]        Open editor, browser, or psql
     {index}  [project] [--all] [--dry-run]   Register pre-existing worktrees
-    {gc}     [--force] [--dry-run] [--sync]  Clean up workspaces whose PR is merged
+    {gc}     [--force] [--dry-run] [--sync] [--remote]  Clean up merged workspaces
     {gc}     --databases            Clean up databases no workspace claims
     {gc}     --sessions             Clean up agent sessions with no worktree left
     {update}                        Download and install the latest release
@@ -230,7 +236,8 @@ fn dispatch(cmd: Cmd) {
             branch,
             force,
             db_only,
-        } => commands::down::run(project, branch, force, db_only),
+            remote,
+        } => commands::down::run(project, branch, force, db_only, remote),
         Cmd::Ls { project, no_pr } => commands::list::run(project, no_pr),
         Cmd::Up { open } => commands::up::run(open),
         Cmd::Proxy { cmd } => commands::proxy::run(cmd),
@@ -252,7 +259,8 @@ fn dispatch(cmd: Cmd) {
             sync,
             sessions,
             databases,
-        } => commands::gc::run(force, dry_run, sync, sessions, databases),
+            remote,
+        } => commands::gc::run(force, dry_run, sync, sessions, databases, remote),
         Cmd::Update => commands::update::run(),
         Cmd::RefreshUpdateCache => {
             let _ = services::updater::refresh_cache();

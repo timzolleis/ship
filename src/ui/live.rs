@@ -26,7 +26,7 @@ impl Cell {
 }
 
 /// Results may land in any order, so every pending cell spins until its own
-/// value arrives. Use `Progress` instead when the work is sequential steps.
+/// value arrives. Use `Tree` instead when the rows are work with outcomes.
 pub struct Live<T> {
     rows: Vec<Row<T>>,
 }

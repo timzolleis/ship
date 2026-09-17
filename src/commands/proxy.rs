@@ -1,3 +1,4 @@
+use crate::domain::removal::Removal;
 use crate::errors::Result;
 use crate::fmt::{blue, bold, dim, green, red, yellow};
 use crate::services::proxy;
@@ -58,7 +59,10 @@ pub fn run(cmd: Option<ProxyCmd>) {
         }
         Some(ProxyCmd::Rm { domain }) => {
             match proxy::remove_route(&domain) {
-                Ok(()) => println!("  {} Removed {}", green("✓"), bold(&domain)),
+                Ok(Removal::Removed) => println!("  {} Removed {}", green("✓"), bold(&domain)),
+                Ok(Removal::AlreadyGone) => {
+                    println!("  {} No route for {}", dim("·"), bold(&domain))
+                }
                 Err(e) => println!("  {} {}", red("✗"), e),
             }
             Ok(())

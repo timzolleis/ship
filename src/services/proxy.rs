@@ -1,8 +1,10 @@
 use crate::domain::caddyfile::{self, Route, BASE_PORT};
+use crate::domain::removal::Removal;
 use crate::errors::{Error, Result};
 use crate::services::{config, shell};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 const CONTAINER: &str = "ship-proxy";
 
@@ -27,6 +29,15 @@ fn mk_dir(path: &Path) -> Result<()> {
         path: path.display().to_string(),
         detail: e.to_string(),
     })
+}
+
+/// Held across the Caddyfile's read-parse-write. Tearing several workspaces
+/// down at once removes routes from different threads, and without this both
+/// read the same text and the last writer drops the other's edit — leaving a
+/// route no workspace claims.
+fn caddyfile_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn write_caddyfile(content: &str) -> Result<()> {
@@ -83,33 +94,39 @@ pub fn reload() {
 }
 
 pub fn add_route(domain: &str, port: u16) -> Result<()> {
-    let content = read_caddyfile()?;
-    if caddyfile::parse_routes(&content)
-        .iter()
-        .any(|r| r.domain == domain)
     {
-        return Err(Error::RouteExists {
-            domain: domain.to_string(),
-        });
+        let _guard = caddyfile_lock();
+        let content = read_caddyfile()?;
+        if caddyfile::parse_routes(&content)
+            .iter()
+            .any(|r| r.domain == domain)
+        {
+            return Err(Error::RouteExists {
+                domain: domain.to_string(),
+            });
+        }
+        write_caddyfile(&caddyfile::add_route(&content, domain, port))?;
     }
-    write_caddyfile(&caddyfile::add_route(&content, domain, port))?;
+    // Outside the lock: reloading re-reads the file, so a concurrent edit only
+    // means one more reload, never a lost route.
     reload();
     Ok(())
 }
 
-pub fn remove_route(domain: &str) -> Result<()> {
-    let content = read_caddyfile()?;
-    if !caddyfile::parse_routes(&content)
-        .iter()
-        .any(|r| r.domain == domain)
+pub fn remove_route(domain: &str) -> Result<Removal> {
     {
-        return Err(Error::RouteNotFound {
-            domain: domain.to_string(),
-        });
+        let _guard = caddyfile_lock();
+        let content = read_caddyfile()?;
+        if !caddyfile::parse_routes(&content)
+            .iter()
+            .any(|r| r.domain == domain)
+        {
+            return Ok(Removal::AlreadyGone);
+        }
+        write_caddyfile(&caddyfile::remove_route(&content, domain))?;
     }
-    write_caddyfile(&caddyfile::remove_route(&content, domain))?;
     reload();
-    Ok(())
+    Ok(Removal::Removed)
 }
 
 pub fn start() -> Result<()> {

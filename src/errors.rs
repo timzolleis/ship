@@ -49,9 +49,6 @@ pub enum Error {
     #[error("Route '{domain}' already exists.")]
     RouteExists { domain: String },
 
-    #[error("Route '{domain}' not found.")]
-    RouteNotFound { domain: String },
-
     #[error("No CA cert yet. Start the proxy and make a request first.")]
     CertNotFound,
 

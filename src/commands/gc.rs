@@ -1,5 +1,6 @@
 use crate::commands::teardown as teardown_ui;
 use crate::domain::db_orphans::{self, OrphanQuery};
+use crate::domain::remote_branch::{self, RemoteBranchPolicy};
 use crate::domain::workspace_name::resolve_pattern;
 use crate::errors::Result;
 use crate::fmt::{bold, dim, green, red, yellow};
@@ -8,7 +9,7 @@ use crate::schema::{ProjectConfig, Workspace};
 use crate::services::agent::{self, SessionDir, WorktreePrefix};
 use crate::services::database::{self, DbTarget};
 use crate::services::github::{self, Pr};
-use crate::services::workspace::TeardownOptions;
+use crate::services::workspace::{TeardownJob, TeardownOptions};
 use crate::services::{config, sync};
 use crate::ui::{Picker, Row, Table, Update};
 use crate::util::{plural, resolve_path};
@@ -16,40 +17,61 @@ use indexmap::IndexMap;
 use std::sync::mpsc;
 
 // ---------------------------------------------------------------------------
-// ship gc [--force] [--dry-run] [--sync] | --databases | --sessions
+// ship gc [--force] [--dry-run] [--sync] [--remote] | --databases | --sessions
 // ---------------------------------------------------------------------------
 
-/// gc tears down harder than `down` does: the branch is merged, so the remote
-/// branch goes too and nothing prompts about dirty state.
-const GC_TEARDOWN: TeardownOptions = TeardownOptions {
-    remove_worktree: true,
-    force: true,
-    delete_remote_branch: true,
-};
+fn gc_teardown(pr: Option<&Pr>, remote: bool) -> TeardownOptions {
+    let policy = if remote {
+        RemoteBranchPolicy::AlwaysDelete
+    } else {
+        RemoteBranchPolicy::ClosedPullRequestsOnly
+    };
+    TeardownOptions {
+        remove_worktree: true,
+        force: true,
+        remote_branch: remote_branch::decide(github::pull_request_branch_state(pr), policy),
+    }
+}
 
 #[derive(Clone)]
 struct Checked {
     ws: Workspace,
-    pr_label: String,
-    merged: bool,
+    pr: Option<Pr>,
+}
+
+impl Checked {
+    fn merged(&self) -> bool {
+        self.pr.as_ref().is_some_and(Pr::is_merged)
+    }
+
+    fn pr_label(&self) -> String {
+        github::pr_label(self.pr.as_ref())
+    }
 }
 
 /// `<project>  <branch>  PR #42 merged 2d ago`
 fn row(c: &Checked) -> Row<Checked> {
     Row::new(
         c.clone(),
-        [dim(&c.ws.project), bold(&c.ws.branch), c.pr_label.clone()],
+        [dim(&c.ws.project), bold(&c.ws.branch), c.pr_label()],
     )
-    .checked(c.merged)
+    .checked(c.merged())
 }
 
-pub fn run(force: bool, dry_run: bool, should_sync: bool, sessions_only: bool, databases: bool) {
+pub fn run(
+    force: bool,
+    dry_run: bool,
+    should_sync: bool,
+    sessions_only: bool,
+    databases: bool,
+    remote: bool,
+) {
     let result = if sessions_only {
         sweep_sessions(force, dry_run).inspect(|()| println!())
     } else if databases {
         sweep_orphans(force, dry_run).inspect(|()| println!())
     } else {
-        run_inner(force, dry_run, should_sync)
+        run_inner(force, dry_run, should_sync, remote)
     };
     if let Err(e) = result {
         eprintln!("\n  {} {}\n", red("Error:"), e);
@@ -143,7 +165,11 @@ fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
     println!();
     println!(
         "  {} Deleted {} of {} session{}.",
-        if deleted == n { green("✓") } else { yellow("⚠") },
+        if deleted == n {
+            green("✓")
+        } else {
+            yellow("⚠")
+        },
         deleted,
         n,
         plural(n)
@@ -204,10 +230,14 @@ fn collect_orphans(projects: &IndexMap<String, ProjectConfig>) -> Result<Scan> {
             source: &pc.database.source,
             claimed: &claimed,
         };
-        found.extend(db_orphans::find(query, &listed).into_iter().map(|db| Orphan {
-            project: alias.clone(),
-            db,
-        }));
+        found.extend(
+            db_orphans::find(query, &listed)
+                .into_iter()
+                .map(|db| Orphan {
+                    project: alias.clone(),
+                    db,
+                }),
+        );
     }
     Ok(Scan {
         orphans: found,
@@ -344,7 +374,11 @@ fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
     println!();
     println!(
         "  {} Dropped {} of {} database{}.",
-        if dropped == n { green("✓") } else { yellow("⚠") },
+        if dropped == n {
+            green("✓")
+        } else {
+            yellow("⚠")
+        },
         dropped,
         n,
         plural(n)
@@ -352,7 +386,7 @@ fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
+fn run_inner(force: bool, dry_run: bool, should_sync: bool, remote: bool) -> Result<()> {
     let workspaces = config::load_workspaces()?;
     if workspaces.is_empty() {
         println!();
@@ -360,7 +394,7 @@ fn run_inner(force: bool, dry_run: bool, should_sync: bool) -> Result<()> {
         println!();
         return Ok(());
     }
-    sweep_workspaces(workspaces, force, dry_run, should_sync)?;
+    sweep_workspaces(workspaces, force, dry_run, should_sync, remote)?;
     println!();
     Ok(())
 }
@@ -380,6 +414,7 @@ fn sweep_workspaces(
     force: bool,
     dry_run: bool,
     should_sync: bool,
+    remote: bool,
 ) -> Result<()> {
     println!();
     println!(
@@ -395,12 +430,11 @@ fn sweep_workspaces(
         .zip(workspaces.iter().cloned())
         .map(|(looked_up, ws)| Checked {
             ws,
-            pr_label: github::pr_label(looked_up.pr.as_ref()),
-            merged: looked_up.pr.as_ref().map(Pr::is_merged).unwrap_or(false),
+            pr: looked_up.pr,
         })
         .collect();
 
-    let merged: Vec<Checked> = checked.iter().filter(|c| c.merged).cloned().collect();
+    let merged: Vec<Checked> = checked.iter().filter(|c| c.merged()).cloned().collect();
 
     if dry_run {
         println!();
@@ -408,7 +442,7 @@ fn sweep_workspaces(
         let rows: Vec<Row<()>> = checked
             .iter()
             .map(|c| {
-                let verdict = if c.merged {
+                let verdict = if c.merged() {
                     yellow("would tear down")
                 } else {
                     dim("keep")
@@ -418,7 +452,7 @@ fn sweep_workspaces(
                     [
                         dim(&c.ws.project),
                         bold(&c.ws.branch),
-                        c.pr_label.clone(),
+                        c.pr_label(),
                         format!("→ {verdict}"),
                     ],
                 )
@@ -459,24 +493,29 @@ fn sweep_workspaces(
         return Ok(());
     }
 
-    // One failure must not strand the rest — report it and carry on.
+    // One unreadable project must not strand the rest — report it and carry on.
     let total = to_clean.len();
     let mut failures: Vec<(String, String)> = Vec::new();
+    let mut jobs = Vec::new();
     for c in &to_clean {
-        println!();
-        println!("  {}", bold(format!("{}/{}", c.ws.project, c.ws.branch)));
-        let name = format!("{}/{}", c.ws.project, c.ws.branch);
-        match config::get_project(&c.ws.project)
-            .and_then(|pc| teardown_ui::run(&c.ws, &pc, GC_TEARDOWN))
-        {
-            Ok(true) => {}
-            // The checklist already showed which step broke; say what it cost.
-            Ok(false) => failures.push((name, "kept in the registry".to_string())),
-            Err(e) => {
-                println!("  {} {}", red("✗"), dim(e.to_string()));
-                failures.push((name, e.to_string()));
-            }
+        match config::get_project(&c.ws.project) {
+            Ok(pc) => jobs.push(TeardownJob {
+                ws: c.ws.clone(),
+                pc,
+                opts: gc_teardown(c.pr.as_ref(), remote),
+            }),
+            Err(e) => failures.push((format!("{}/{}", c.ws.project, c.ws.branch), e.to_string())),
         }
+    }
+
+    println!();
+    match teardown_ui::run_all(jobs) {
+        // The tree already showed which step broke; say what it cost.
+        Ok(kept) => failures.extend(
+            kept.into_iter()
+                .map(|name| (name, "kept in the registry".to_string())),
+        ),
+        Err(e) => println!("  {} {}", red("✗"), dim(e.to_string())),
     }
 
     let cleaned = total - failures.len();

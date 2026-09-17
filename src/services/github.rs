@@ -1,3 +1,4 @@
+use crate::domain::remote_branch::PullRequestBranchState;
 use crate::fmt::{blue, dim, green, yellow};
 use crate::schema::Workspace;
 use crate::services::{config, shell};
@@ -19,6 +20,11 @@ pub struct Pr {
 impl Pr {
     pub fn is_merged(&self) -> bool {
         self.state == "MERGED"
+    }
+
+    /// Drafts report `OPEN` too — deleting their branch closes them just the same.
+    pub fn is_open(&self) -> bool {
+        self.state == "OPEN"
     }
 }
 
@@ -48,6 +54,14 @@ pub fn pr_for_branch(project_path: &str, branch: &str) -> Option<Pr> {
     .and_then(|r| serde_json::from_str(&r.stdout).ok())
 }
 
+pub fn pull_request_branch_state(pr: Option<&Pr>) -> PullRequestBranchState {
+    match pr {
+        Some(pr) if pr.is_open() => PullRequestBranchState::Open(pr.number),
+        Some(pr) if pr.state == "CLOSED" || pr.is_merged() => PullRequestBranchState::Closed,
+        None | Some(_) => PullRequestBranchState::NoPullRequest,
+    }
+}
+
 pub fn pr_label(pr: Option<&Pr>) -> String {
     match pr {
         Some(pr) if pr.is_merged() => format!(
@@ -59,7 +73,7 @@ pub fn pr_label(pr: Option<&Pr>) -> String {
                 .map(|m| format!(" {}", dim(time_ago(m))))
                 .unwrap_or_default()
         ),
-        Some(pr) if pr.state == "OPEN" => format!("PR #{} {}", pr.number, blue("open")),
+        Some(pr) if pr.is_open() => format!("PR #{} {}", pr.number, blue("open")),
         Some(pr) => format!("PR #{} {}", pr.number, yellow("closed")),
         None => dim("no PR"),
     }
@@ -100,4 +114,41 @@ pub fn look_up_all(workspaces: &[Workspace]) -> Vec<WorkspacePr> {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pr(state: &str) -> Pr {
+        Pr {
+            state: state.to_string(),
+            number: 42,
+            merged_at: None,
+        }
+    }
+
+    #[test]
+    fn only_known_closed_pr_states_allow_default_branch_deletion() {
+        assert_eq!(
+            pull_request_branch_state(Some(&pr("OPEN"))),
+            PullRequestBranchState::Open(42)
+        );
+        assert_eq!(
+            pull_request_branch_state(Some(&pr("CLOSED"))),
+            PullRequestBranchState::Closed
+        );
+        assert_eq!(
+            pull_request_branch_state(Some(&pr("MERGED"))),
+            PullRequestBranchState::Closed
+        );
+        assert_eq!(
+            pull_request_branch_state(Some(&pr("UNKNOWN"))),
+            PullRequestBranchState::NoPullRequest
+        );
+        assert_eq!(
+            pull_request_branch_state(None),
+            PullRequestBranchState::NoPullRequest
+        );
+    }
 }

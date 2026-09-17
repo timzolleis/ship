@@ -122,15 +122,15 @@ pub fn orphans(prefixes: &[WorktreePrefix]) -> Vec<SessionDir> {
     list()
         .into_iter()
         .filter(|dir| {
-            prefixes.iter().any(|prefix| {
-                match session_slug::remainder(&dir.name, &prefix.full()) {
+            prefixes.iter().any(
+                |prefix| match session_slug::remainder(&dir.name, &prefix.full()) {
                     Some(tail) => {
                         let tail = format!("{}{}", prefix.stem, tail);
                         session_slug::resolve(&prefix.parent, &tail, &exists).is_none()
                     }
                     None => false,
-                }
-            })
+                },
+            )
         })
         .collect()
 }

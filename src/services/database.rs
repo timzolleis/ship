@@ -54,7 +54,12 @@ pub fn list(t: DbTarget) -> Result<Vec<String>> {
     runner::run(
         t.runtime,
         "psql",
-        &["-U", t.user, "-tAc", "SELECT datname FROM pg_database ORDER BY datname"],
+        &[
+            "-U",
+            t.user,
+            "-tAc",
+            "SELECT datname FROM pg_database ORDER BY datname",
+        ],
     )
     .map(|r| {
         r.stdout
@@ -74,7 +79,10 @@ pub fn exists(t: DbTarget, db: &str) -> bool {
 }
 
 fn size(rt: &ExecutionRuntime, user: &str, db: &str) -> Option<String> {
-    let sql = format!("SELECT pg_size_pretty(pg_database_size('{}'))", db.replace('\'', "''"));
+    let sql = format!(
+        "SELECT pg_size_pretty(pg_database_size('{}'))",
+        db.replace('\'', "''")
+    );
     runner::run(rt, "psql", &["-U", user, "-tAc", &sql])
         .ok()
         .map(|r| r.stdout.trim().to_string())

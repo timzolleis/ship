@@ -1,39 +1,36 @@
 use crate::commands::teardown;
+use crate::domain::remote_branch::{self, RemoteBranchAction, RemoteBranchPolicy};
 use crate::domain::workspace_locate::locate_workspace;
 use crate::errors::Result;
 use crate::fmt::{bold, dim, green, red, yellow};
 use crate::prompt;
-use crate::schema::{ProjectConfig, Workspace};
+use crate::schema::Workspace;
 use crate::services::config;
 use crate::services::github;
-use crate::services::workspace::TeardownOptions;
+use crate::services::workspace::{TeardownJob, TeardownOptions};
 use crate::ui::{Picker, Row, Table, Update};
 use crate::util::{cwd_string, plural};
 
 // ---------------------------------------------------------------------------
-// ship down [project] [branch] [--force] [--db-only]
+// ship down [project] [branch] [--force] [--db-only] [--remote]
 // ---------------------------------------------------------------------------
 
-/// down's option mapping: remove_worktree = !db_only, delete_remote_branch = false.
-pub fn tear_down_workspace(
-    workspace: &Workspace,
-    project_config: &ProjectConfig,
-    db_only: bool,
-    force: bool,
-) -> Result<bool> {
-    teardown::run(
-        workspace,
-        project_config,
-        TeardownOptions {
-            remove_worktree: !db_only,
-            force,
-            delete_remote_branch: false,
-        },
-    )
+fn down_options(db_only: bool, force: bool, remote_branch: RemoteBranchAction) -> TeardownOptions {
+    TeardownOptions {
+        remove_worktree: !db_only,
+        force,
+        remote_branch,
+    }
 }
 
-pub fn run(project: Option<String>, branch: Option<String>, force: bool, db_only: bool) {
-    if let Err(e) = run_inner(project, branch, force, db_only) {
+pub fn run(
+    project: Option<String>,
+    branch: Option<String>,
+    force: bool,
+    db_only: bool,
+    remote: bool,
+) {
+    if let Err(e) = run_inner(project, branch, force, db_only, remote) {
         eprintln!("\n  {} {}\n", red("Error:"), e);
     }
 }
@@ -50,15 +47,15 @@ fn row(ws: &Workspace, pr_label: Option<&str>) -> Row<Workspace> {
     }
 }
 
-/// A workspace to tear down, plus its PR status once looked up.
+/// A workspace to tear down, plus authoritative PR state once looked up.
 struct Target {
     ws: Workspace,
-    pr_label: Option<String>,
+    pr: Option<github::Pr>,
 }
 
 impl Target {
     fn pending(ws: Workspace) -> Self {
-        Target { ws, pr_label: None }
+        Target { ws, pr: None }
     }
 }
 
@@ -79,10 +76,7 @@ fn pick_workspaces(candidates: &[&Workspace]) -> Result<Vec<Target>> {
 
     Ok(picked
         .into_iter()
-        .map(|r| Target {
-            pr_label: r.cell(PR_COLUMN).map(str::to_string),
-            ws: r.value,
-        })
+        .map(|r| Target::pending(r.value))
         .collect())
 }
 
@@ -91,6 +85,7 @@ fn run_inner(
     branch_opt: Option<String>,
     force: bool,
     db_only: bool,
+    remote: bool,
 ) -> Result<()> {
     // Resolve targets. Explicit args and the cwd workspace stay single-target;
     // only the "nothing to go on" path opens the picker.
@@ -139,23 +134,26 @@ fn run_inner(
         return Ok(());
     }
 
-    // Confirm once for the whole set. The picker already showed PR status, so
-    // only the single-target paths pay for a lookup here.
-    if !force {
-        let pending: Vec<Workspace> = targets
-            .iter()
-            .filter(|t| t.pr_label.is_none())
-            .map(|t| t.ws.clone())
-            .collect();
-        let mut looked_up = github::look_up_all(&pending).into_iter();
-        for target in targets.iter_mut().filter(|t| t.pr_label.is_none()) {
-            let pr = looked_up.next().and_then(|l| l.pr);
-            target.pr_label = Some(github::pr_label(pr.as_ref()));
-        }
+    let remote_policy = if remote {
+        RemoteBranchPolicy::AlwaysDelete
+    } else {
+        RemoteBranchPolicy::ClosedPullRequestsOnly
+    };
 
+    // Confirmation shows PR status, and the safe default needs authoritative
+    // PR state even with --force. Picker cell updates are display-only, so
+    // selected picker rows are looked up again here.
+    if !force || (!db_only && !remote) {
+        let selected: Vec<Workspace> = targets.iter().map(|t| t.ws.clone()).collect();
+        for (target, looked_up) in targets.iter_mut().zip(github::look_up_all(&selected)) {
+            target.pr = looked_up.pr;
+        }
+    }
+
+    if !force {
         let rows: Vec<Row<Workspace>> = targets
             .iter()
-            .map(|t| row(&t.ws, Some(t.pr_label.as_deref().unwrap_or(""))))
+            .map(|t| row(&t.ws, Some(&github::pr_label(t.pr.as_ref()))))
             .collect();
         let table = Table::measure(&rows);
         println!();
@@ -174,25 +172,36 @@ fn run_inner(
         }
     }
 
-    // One failure must not strand the rest — report it and carry on.
+    // One unreadable project must not strand the rest — report it and carry on.
     let mut failures: Vec<(String, String)> = Vec::new();
     let total = targets.len();
-
-    for Target { ws, .. } in &targets {
-        println!();
-        println!("  {}", bold(format!("{}/{}", ws.project, ws.branch)));
-        let name = format!("{}/{}", ws.project, ws.branch);
-        match config::get_project(&ws.project)
-            .and_then(|pc| tear_down_workspace(ws, &pc, db_only, force))
-        {
-            Ok(true) => {}
-            // The checklist already showed which step broke; say what it cost.
-            Ok(false) => failures.push((name, "kept in the registry".to_string())),
-            Err(e) => {
-                println!("  {} {}", red("✗"), dim(e.to_string()));
-                failures.push((name, e.to_string()));
-            }
+    let mut jobs = Vec::new();
+    for Target { ws, pr } in &targets {
+        match config::get_project(&ws.project) {
+            Ok(pc) => jobs.push(TeardownJob {
+                ws: ws.clone(),
+                pc,
+                opts: down_options(
+                    db_only,
+                    force,
+                    remote_branch::decide(
+                        github::pull_request_branch_state(pr.as_ref()),
+                        remote_policy,
+                    ),
+                ),
+            }),
+            Err(e) => failures.push((format!("{}/{}", ws.project, ws.branch), e.to_string())),
         }
+    }
+
+    println!();
+    match teardown::run_all(jobs) {
+        // The tree already showed which step broke; say what it cost.
+        Ok(kept) => failures.extend(
+            kept.into_iter()
+                .map(|name| (name, "kept in the registry".to_string())),
+        ),
+        Err(e) => println!("  {} {}", red("✗"), dim(e.to_string())),
     }
 
     println!();

@@ -28,13 +28,15 @@ src/
 │   ├── table.rs         # Rows of cells + ANSI-aware column widths (pure)
 │   ├── picker.rs        # Single/multi list picker; cells can stream in from a background lookup
 │   ├── live.rs          # Static table whose pending cells spin until a lookup fills them
-│   └── progress.rs      # Live checklist; the running row spins, results land in place
+│   └── tree.rs          # Live tree: headings with rows that spin, finish, and land in place
 ├── schema.rs            # serde models: ShipConfig, ProjectConfig, Workspace, UpdateCache
 ├── util.rs              # resolve_path (Node path.resolve semantics), cwd_string, plural
 ├── domain/              # Pure logic — no IO, no subprocesses
 │   ├── caddyfile.rs     # Route codec + next_port allocation
 │   ├── db_orphans.rs    # Databases matching a project pattern that no workspace claims
 │   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url)
+│   ├── removal.rs       # Removed vs AlreadyGone — a teardown step's two successes
+│   ├── remote_branch.rs # Safe default vs explicit remote-branch deletion policy
 │   ├── session_slug.rs  # Agent session dir name ↔ path (a `-` is a literal or a `/`)
 │   ├── workspace_locate.rs  # cwd/branch-query → workspace resolution
 │   └── workspace_name.rs    # Slugging + {placeholder} pattern resolution (both directions)
@@ -65,10 +67,12 @@ src/
 - **Formatting**: import from `src/fmt.rs`. Never define local ANSI helpers. Color is dropped automatically when stdout isn't a TTY or `NO_COLOR` is set.
 - **Aligned columns**: build `ui::Row`s and let `ui::Table` measure them. It ignores ANSI codes, so cells may arrive pre-colored. Hand-rolled `{:<22}` padding breaks on long values — that's what it replaced.
 - **Slow list data**: give the row a `.pending()` cell and feed `Picker::stream` a `Receiver`. The list draws at once, a spinner holds the column, and each result swaps in. `services::github::look_up_stream` is the reference producer.
-- **Live listings**: `ui::Live` draws a table once and swaps late cells in as they land, in any order (`ship ls` + `github::look_up_stream`). Use `Progress` instead when the work is sequential steps. `Live` never truncates piped output — a pipe has no width, and cutting there drops data.
-- **Tearing a workspace down**: always `commands::teardown::run` — it draws the checklist and drops the registry entry. Callers differ only in `TeardownOptions` (`gc` deletes the remote branch and forces; `down` does neither). A warned step keeps the registry entry so the next run retries it; steps skip what is already gone, so retrying is safe.
+- **Live listings**: `ui::Live` draws a table once and swaps late cells in as they land, in any order (`ship ls` + `github::look_up_stream`). Use `ui::Tree` instead when the rows are work with outcomes. `Live` never truncates piped output — a pipe has no width, and cutting there drops data.
+- **Tearing workspaces down**: always `commands::teardown::run_all` — it draws the tree, tears every job down in parallel, and drops the registry entries. `domain::remote_branch::decide` owns remote-branch safety for both `down` and `gc`: by default only a known closed or merged PR permits deletion; no PR, lookup failure, and open PRs keep the branch with a visible reason. `--remote` explicitly overrides that protection without changing `gc` workspace selection. It returns the workspaces still in the registry, and the caller reports them.
+- **Already gone is a success**: teardown must be safe to retry, so `git`'s and `proxy`'s removal calls return `domain::removal::Removal` and a missing target lands as `Status::SkippedExisting`. Treating absence as a failure keeps the registry entry, and every retry fails on the same missing target — the entry never clears. `delete_remote_branch` pushes first and only runs `ls-remote` when the push fails, so the common path pays one round trip.
 - **`ship gc` has three exclusive modes**: default sweeps workspaces (blocking PR lookup, then a picker with merged rows pre-checked), `--databases` sweeps unclaimed databases, `--sessions` sweeps orphaned agent transcripts. The database sweep pings every project's server, which is why it is not part of the default run.
-- **Live step lists**: pair `ui::Progress` with a `*_stream` service that runs the work on a thread and sends one event per finished step (`workspace::teardown_stream`). `Progress` spins the first unfinished row, so the work must be sequential. Only steps whose output is captured may animate — `sync`'s install/migrate commands inherit stdio and would trample the table, which is why provisioning still buffers.
+- **Live step lists**: pair `ui::Tree` with a `*_stream` service that runs the work on threads and sends one event per finished step (`workspace::teardown_all_stream`). A section's `Pace` decides which rows may spin: `Sequential` spins the first unfinished row, `Concurrent` spins every unfinished one. `Mark::running` swaps a row's text without stopping its spinner. Only steps whose output is captured may animate — `sync`'s install/migrate commands inherit stdio and would trample the table, which is why provisioning still buffers.
+- **Parallel teardown's shared writers**: steps run on one thread per workspace, so anything with a read-modify-write needs an owner. The Caddyfile has a mutex in `proxy` (two threads would otherwise read the same text and the last writer would strand a route); `git` takes one lock per repo (two ref updates in one repo race for `packed-refs.lock`); `workspaces.json` is only ever written by `teardown::run_all` on the main thread, after the render loop ends.
 - **Env rewriting**: `env.files` maps each .env path to its own vars, because one name needs different handling per package (shared postgres `DATABASE_URL` gets rewritten, a worktree-relative sqlite one is `plain`). The pre-per-file flat `autoDetected` shape still decodes by fanning every var out to every file. `ship config show` reports the stored handling with on-disk line numbers.
 - **Agent sessions**: every harness stores transcripts in one dir per project path, flattening `/` to `-` — `services::agent::STORES` lists the roots. The flattening is lossy, so a name only proves which path it means when that path exists: `session_slug::resolve` tries each `-` both ways and prunes against the filesystem. `gc --sessions` only considers names under a project's worktree prefix and only deletes ones no live path claims. Teardown skips the step when `deleteAgentSessions` is false.
 - **Workspace state has three sources**: tracked files come from the git checkout, postgres from `database::clone_db`, and file-backed state (sqlite, certs, fixtures) from `copy::copy_paths` over the project's `copy` list. `init` proposes copy paths only when git ignores them — tracked files already arrive with the checkout.
@@ -80,7 +84,7 @@ src/
 
 ## Error Variants (src/errors.rs)
 
-`ProjectNotFound`, `ParseConfig`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `RouteNotFound`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `Prompt`.
+`ProjectNotFound`, `ParseConfig`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `Prompt`.
 
 ## Config Storage
 

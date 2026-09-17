@@ -116,7 +116,10 @@ mod tests {
             Some("-fix-editor--")
         );
         // The checkout itself: nothing but wrapping follows.
-        assert_eq!(remainder("--Users-tim-code-app--", "/Users/tim/code/app"), None);
+        assert_eq!(
+            remainder("--Users-tim-code-app--", "/Users/tim/code/app"),
+            None
+        );
         // A different project.
         assert_eq!(remainder("--Users-tim-code-other--", prefix), None);
     }

@@ -1,4 +1,6 @@
 use crate::domain::env_patch::EnvPatchContext;
+use crate::domain::remote_branch::RemoteBranchAction;
+use crate::domain::removal::Removal;
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
 use crate::schema::{ExecutionRuntime, ProjectConfig, Workspace};
@@ -146,10 +148,11 @@ pub struct ProvisionOutcome {
     pub env_changes: Vec<PatchResult>,
 }
 
+#[derive(Clone, Copy)]
 pub struct TeardownOptions {
     pub remove_worktree: bool,
     pub force: bool,
-    pub delete_remote_branch: bool,
+    pub remote_branch: RemoteBranchAction,
 }
 
 fn runtime_label(pc: &ProjectConfig) -> String {
@@ -380,9 +383,7 @@ pub fn teardown_steps(opts: &TeardownOptions) -> Vec<TeardownStep> {
     if opts.remove_worktree {
         steps.push(TeardownStep::Worktree);
         steps.push(TeardownStep::Branch);
-        if opts.delete_remote_branch {
-            steps.push(TeardownStep::RemoteBranch);
-        }
+        steps.push(TeardownStep::RemoteBranch);
         if agent::cleanup_enabled() {
             steps.push(TeardownStep::AgentSessions);
         }
@@ -390,19 +391,33 @@ pub fn teardown_steps(opts: &TeardownOptions) -> Vec<TeardownStep> {
     steps
 }
 
-/// Teardown on a worker thread, one event per finished step. The caller keeps
-/// its terminal free to animate while `git` and `dropdb` run.
-pub fn teardown_stream(
-    ws: Workspace,
-    pc: ProjectConfig,
-    opts: TeardownOptions,
-) -> mpsc::Receiver<StepEvent<TeardownStep>> {
+/// One job per workspace to tear down.
+#[derive(Clone)]
+pub struct TeardownJob {
+    pub ws: Workspace,
+    pub pc: ProjectConfig,
+    pub opts: TeardownOptions,
+}
+
+/// Every job at once, one thread each, all events on one channel tagged with
+/// the job's index. Steps within a job stay sequential — the parallelism is
+/// across workspaces, where the waiting actually is (`git push` to delete a
+/// remote branch, `dropdb` over docker).
+///
+/// Nothing here writes the registry: the caller drops entries on the main
+/// thread once the render loop ends, so `workspaces.json` has a single writer.
+pub fn teardown_all_stream(
+    jobs: Vec<TeardownJob>,
+) -> mpsc::Receiver<(usize, StepEvent<TeardownStep>)> {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        teardown_each(&ws, &pc, &opts, |e| {
-            let _ = tx.send(e);
-        })
-    });
+    for (index, job) in jobs.into_iter().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            teardown_each(&job.ws, &job.pc, &job.opts, |e| {
+                let _ = tx.send((index, e));
+            })
+        });
+    }
     rx
 }
 
@@ -415,7 +430,8 @@ fn teardown_each(
     let target = DbTarget::from(&pc.database);
 
     emit(match proxy::remove_route(&ws.proxy_domain) {
-        Ok(()) => step(TeardownStep::ProxyRoute, Status::Done, None),
+        Ok(Removal::Removed) => step(TeardownStep::ProxyRoute, Status::Done, None),
+        Ok(Removal::AlreadyGone) => step(TeardownStep::ProxyRoute, Status::SkippedExisting, None),
         Err(e) => step(
             TeardownStep::ProxyRoute,
             Status::Warning,
@@ -433,7 +449,8 @@ fn teardown_each(
         // remove` refuses — e.g. uncommitted changes without --force, or corrupt
         // metadata — still clear the dir from disk so no orphan is left behind.
         emit(match git::worktree_remove(&pc.path, &ws.path, opts.force) {
-            Ok(()) => step(TeardownStep::Worktree, Status::Done, None),
+            Ok(Removal::Removed) => step(TeardownStep::Worktree, Status::Done, None),
+            Ok(Removal::AlreadyGone) => step(TeardownStep::Worktree, Status::SkippedExisting, None),
             Err(_) => match std::fs::remove_dir_all(&ws.path) {
                 Ok(()) => step(
                     TeardownStep::Worktree,
@@ -445,19 +462,35 @@ fn teardown_each(
         });
 
         emit(match git::delete_branch(&pc.path, &ws.branch) {
-            Ok(()) => step(TeardownStep::Branch, Status::Done, None),
+            Ok(Removal::Removed) => step(TeardownStep::Branch, Status::Done, None),
+            Ok(Removal::AlreadyGone) => step(TeardownStep::Branch, Status::SkippedExisting, None),
             Err(e) => step(TeardownStep::Branch, Status::Warning, Some(e.to_string())),
         });
 
-        if opts.delete_remote_branch {
-            emit(match git::delete_remote_branch(&pc.path, &ws.branch) {
-                Ok(()) => step(TeardownStep::RemoteBranch, Status::Done, None),
-                Err(e) => step(
-                    TeardownStep::RemoteBranch,
-                    Status::Warning,
-                    Some(e.to_string()),
-                ),
-            });
+        match opts.remote_branch {
+            RemoteBranchAction::KeepNoPullRequest => emit(step(
+                TeardownStep::RemoteBranch,
+                Status::SkippedExisting,
+                Some("kept \u{2014} no PR".to_string()),
+            )),
+            RemoteBranchAction::KeepOpenPullRequest(number) => emit(step(
+                TeardownStep::RemoteBranch,
+                Status::SkippedExisting,
+                Some(format!("kept \u{2014} PR #{number} is open")),
+            )),
+            RemoteBranchAction::Delete => {
+                emit(match git::delete_remote_branch(&pc.path, &ws.branch) {
+                    Ok(Removal::Removed) => step(TeardownStep::RemoteBranch, Status::Done, None),
+                    Ok(Removal::AlreadyGone) => {
+                        step(TeardownStep::RemoteBranch, Status::SkippedExisting, None)
+                    }
+                    Err(e) => step(
+                        TeardownStep::RemoteBranch,
+                        Status::Warning,
+                        Some(e.to_string()),
+                    ),
+                });
+            }
         }
 
         if agent::cleanup_enabled() {
@@ -492,4 +525,29 @@ pub fn reset_database(ws: &Workspace, pc: &ProjectConfig) -> Result<Vec<StepEven
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(remote_branch: RemoteBranchAction) -> TeardownOptions {
+        TeardownOptions {
+            remove_worktree: true,
+            force: true,
+            remote_branch,
+        }
+    }
+
+    /// Every remote-branch decision needs a row so kept branches explain why.
+    #[test]
+    fn remote_branch_decisions_stay_visible_in_the_checklist() {
+        for action in [
+            RemoteBranchAction::KeepNoPullRequest,
+            RemoteBranchAction::KeepOpenPullRequest(42),
+            RemoteBranchAction::Delete,
+        ] {
+            assert!(teardown_steps(&opts(action)).contains(&TeardownStep::RemoteBranch));
+        }
+    }
 }

@@ -1,6 +1,7 @@
 use crate::errors::Result;
 use crate::fmt::{blue, bold, dim};
 use crate::services::config;
+use crate::ui::{Live, Row};
 use crate::util::plural;
 
 // ---------------------------------------------------------------------------
@@ -25,35 +26,20 @@ fn run_inner() -> Result<()> {
         return Ok(());
     }
 
-    let alias_width = entries
-        .iter()
-        .map(|(a, _)| a.len())
-        .max()
-        .unwrap_or(0)
-        .max(7);
+    let mut rows = vec![Row::new((), ["ALIAS", "PATH", "DB CONTAINER"].map(dim))];
+    rows.extend(entries.iter().map(|(alias, project)| {
+        Row::new(
+            (),
+            [
+                bold(alias),
+                blue(&project.path),
+                project.database.docker_container().to_string(),
+            ],
+        )
+    }));
 
     println!();
-    println!(
-        "  {:<aw$}  {:<40}  DB CONTAINER",
-        "ALIAS",
-        "PATH",
-        aw = alias_width
-    );
-    println!(
-        "  {}  {}  {}",
-        dim("─".repeat(alias_width)),
-        dim("─".repeat(40)),
-        dim("─".repeat(16))
-    );
-
-    for (alias, project) in &entries {
-        println!(
-            "  {}  {}  {}",
-            bold(format!("{:<aw$}", alias, aw = alias_width)),
-            blue(format!("{:<40}", project.path)),
-            project.database.docker_container()
-        );
-    }
+    Live::new(rows).print()?;
 
     println!();
     println!(

@@ -136,6 +136,7 @@ fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
     } else {
         Picker::new("Select sessions to delete", rows)
             .multi()
+            .header(&["HARNESS", "SESSION"])
             .interact()?
             .into_iter()
             .map(|r| r.value)
@@ -293,6 +294,7 @@ fn pick_orphans(
 
     let picked = Picker::new("Select databases to drop", rows)
         .multi()
+        .header(&["PROJECT", "DATABASE", "SIZE"])
         .stream(sizes, |(i, size): (usize, String)| {
             Update::new(i, SIZE_COLUMN, dim(size))
         })
@@ -405,17 +407,19 @@ fn pick_workspaces(checked: &[Checked]) -> Result<Vec<Checked>> {
     let rows: Vec<Row<Checked>> = checked.iter().map(row).collect();
     let picked = Picker::new("Select workspaces to tear down", rows)
         .multi()
+        .header(&["PROJECT", "BRANCH", "PR"])
         .interact()?;
     Ok(picked.into_iter().map(|r| r.value).collect())
 }
 
 fn sweep_workspaces(
-    workspaces: Vec<Workspace>,
+    mut workspaces: Vec<Workspace>,
     force: bool,
     dry_run: bool,
     should_sync: bool,
     remote: bool,
 ) -> Result<()> {
+    workspaces.sort_by(Workspace::listing_order);
     println!();
     println!(
         "  Checking {} workspace{}...",
@@ -458,8 +462,9 @@ fn sweep_workspaces(
                 )
             })
             .collect();
-        let table = Table::measure(&rows);
-        for r in &rows {
+        let header = Row::new((), ["PROJECT", "BRANCH", "PR"].map(dim));
+        let table = Table::measure(&rows).widen(&header);
+        for r in std::iter::once(&header).chain(&rows) {
             println!("  {}", table.line(r, ""));
         }
         println!();

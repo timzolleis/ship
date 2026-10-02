@@ -6,6 +6,7 @@ use crate::schema::{
     ExecutionRuntime, ProjectConfig, ShipConfig, WorktreeConfig,
 };
 use crate::services::{config, copy, git, proxy};
+use crate::ui::{Row, Table};
 use crate::util::cwd_string;
 use indexmap::IndexMap;
 use regex::Regex;
@@ -294,26 +295,33 @@ fn truncate(value: &str, max: usize) -> String {
 }
 
 fn print_env_table(files: &IndexMap<String, EnvFileVars>, values: &EnvValues) {
-    let key_width = files
-        .values()
-        .flat_map(|vars| vars.keys())
-        .map(|k| k.len())
-        .max()
-        .unwrap_or(0);
+    let groups: Vec<(&String, Vec<Row<()>>)> = files
+        .iter()
+        .map(|(file, vars)| {
+            let rows = vars
+                .iter()
+                .map(|(key, cfg)| {
+                    let value = values
+                        .get(file)
+                        .and_then(|v| v.get(key))
+                        .map(|v| truncate(v, 44))
+                        .unwrap_or_else(|| "(not present)".to_string());
+                    Row::new((), [key.clone(), dim(value), green(cfg.var_type.label())])
+                })
+                .collect();
+            (file, rows)
+        })
+        .collect();
 
-    for (file, vars) in files {
+    // One width across every file, so the columns line up under each heading.
+    let table = groups
+        .iter()
+        .flat_map(|(_, rows)| rows)
+        .fold(Table::measure::<()>(&[]), |table, row| table.widen(row));
+    for (file, rows) in &groups {
         println!("    {}", blue(file));
-        for (key, cfg) in vars {
-            let value = values
-                .get(file)
-                .and_then(|v| v.get(key))
-                .map(|v| truncate(v, 44))
-                .unwrap_or_else(|| "(not present)".to_string());
-            println!(
-                "      {key:<key_width$}  {}  {}",
-                dim(format!("{:<45}", truncate(&value, 45))),
-                green(cfg.var_type.label())
-            );
+        for row in rows {
+            println!("      {}", table.line(row, ""));
         }
     }
 }
@@ -332,34 +340,39 @@ fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues
         }
 
         // Flat row list so picking a var is one selection, not file-then-var.
-        let rows: Vec<(String, String)> = files
+        // `None` is the trailing "Done" row.
+        let mut rows: Vec<Row<Option<(String, String)>>> = files
             .iter()
-            .flat_map(|(file, vars)| vars.keys().map(|k| (file.clone(), k.clone())))
-            .collect();
-        let mut items: Vec<String> = rows
-            .iter()
-            .map(|(file, key)| {
-                let label = files[file][key].var_type.label();
-                format!("{file}  {key}  ({label})")
+            .flat_map(|(file, vars)| {
+                vars.iter().map(move |(key, cfg)| {
+                    Row::new(
+                        Some((file.clone(), key.clone())),
+                        [blue(file), bold(key), green(cfg.var_type.label())],
+                    )
+                })
             })
             .collect();
-        items.push("Done".to_string());
+        rows.push(Row::new(None, [dim("Done")]));
 
-        let picked = prompt::select("Which variable?", &items)?;
-        let Some((file, key)) = rows.get(picked) else {
+        let picked = prompt::pick("Which variable?", &["FILE", "VAR", "HANDLING"], rows)?;
+        let Some((file, key)) = picked.as_ref() else {
             return Ok(());
         };
 
         let current = files[file][key].var_type;
-        // Current handling first so enter keeps it (prompt::select defaults to 0).
+        // Current handling first so enter keeps it (the picker starts on row 0).
         let choices: Vec<EnvVarType> = std::iter::once(current)
             .chain(EnvVarType::ALL.into_iter().filter(|t| *t != current))
             .collect();
-        let labels: Vec<String> = choices
-            .iter()
-            .map(|t| format!("{:<24} {}", t.label(), t.help()))
+        let rows = choices
+            .into_iter()
+            .map(|t| Row::new(t, [green(t.label()), dim(t.help())]))
             .collect();
-        let chosen = choices[prompt::select(&format!("Handling for {key}"), &labels)?];
+        let chosen = prompt::pick(
+            &format!("Handling for {key}"),
+            &["HANDLING", "DETAIL"],
+            rows,
+        )?;
 
         let path = if chosen == EnvVarType::DevUrl {
             let existing_path = files[file][key].path.clone().unwrap_or_default();

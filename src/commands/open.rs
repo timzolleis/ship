@@ -1,3 +1,4 @@
+use crate::commands::list;
 use crate::domain::workspace_locate::locate_workspace;
 use crate::errors::{Error, Result};
 use crate::fmt::{bold, red};
@@ -5,6 +6,7 @@ use crate::prompt;
 use crate::schema::Workspace;
 use crate::services::database::{self, DbTarget};
 use crate::services::{config, editor, shell};
+use crate::ui::Row;
 use crate::util::cwd_string;
 
 // ---------------------------------------------------------------------------
@@ -43,19 +45,16 @@ fn resolve_workspace(
     if workspaces.is_empty() {
         return Err(Error::NoActiveWorkspaces);
     }
-    let items: Vec<String> = workspaces
-        .iter()
+    let mut listed = workspaces.to_vec();
+    listed.sort_by(Workspace::listing_order);
+    let rows = listed
+        .into_iter()
         .map(|w| {
-            format!(
-                "{}  {}  {}",
-                w.project,
-                w.branch,
-                crate::fmt::dim(&w.proxy_domain)
-            )
+            let cells = list::cells(&w);
+            Row::new(w, cells)
         })
         .collect();
-    let idx = prompt::select("Select a workspace", &items)?;
-    Ok(workspaces[idx].clone())
+    prompt::pick("Select a workspace", &list::COLUMNS, rows)
 }
 
 pub fn run(first: Option<String>, second: Option<String>) {

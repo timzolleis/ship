@@ -63,12 +63,14 @@ impl Target {
 /// each PR status swaps in as `gh` answers, so nobody waits to start picking.
 /// Returns the picked workspaces (empty = cancelled).
 fn pick_workspaces(candidates: &[&Workspace]) -> Result<Vec<Target>> {
-    let owned: Vec<Workspace> = candidates.iter().map(|w| (*w).clone()).collect();
+    let mut owned: Vec<Workspace> = candidates.iter().map(|w| (*w).clone()).collect();
+    owned.sort_by(Workspace::listing_order);
     let rows = owned.iter().map(|ws| row(ws, None)).collect();
     let prs = github::look_up_stream(owned);
 
     let picked = Picker::new("Select workspaces to tear down", rows)
         .multi()
+        .header(&["PROJECT", "BRANCH", "PR"])
         .stream(prs, |(i, found): (usize, github::WorkspacePr)| {
             Update::new(i, PR_COLUMN, github::pr_label(found.pr.as_ref()))
         })

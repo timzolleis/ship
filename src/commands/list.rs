@@ -21,16 +21,21 @@ pub fn run(project: Option<String>, no_pr: bool) {
     }
 }
 
+/// Titles for `cells`. `ship open`'s picker shares both so the two listings
+/// read the same.
+pub const COLUMNS: [&str; 3] = ["PROJECT", "BRANCH", "PORT"];
+
+pub fn cells(ws: &Workspace) -> [String; 3] {
+    [dim(&ws.project), bold(&ws.branch), blue(ws.port)]
+}
+
 fn header(no_pr: bool) -> Row<()> {
-    let columns: &[&str] = match no_pr {
-        true => &["PROJECT", "BRANCH", "PORT"],
-        false => &["PROJECT", "BRANCH", "PORT", "PR"],
-    };
-    Row::new((), columns.iter().map(dim))
+    let pr: &[&str] = if no_pr { &[] } else { &["PR"] };
+    Row::new((), COLUMNS.iter().chain(pr).map(dim))
 }
 
 fn row(ws: &Workspace) -> Row<()> {
-    Row::new((), [dim(&ws.project), bold(&ws.branch), blue(ws.port)])
+    Row::new((), cells(ws))
 }
 
 fn run_inner(project_opt: Option<String>, no_pr: bool) -> Result<()> {
@@ -40,8 +45,7 @@ fn run_inner(project_opt: Option<String>, no_pr: bool) -> Result<()> {
         Some(p) => workspaces.into_iter().filter(|w| &w.project == p).collect(),
         None => workspaces,
     };
-    // The registry is in creation order; one project per block reads better.
-    listed.sort_by(|a, b| (&a.project, &a.branch).cmp(&(&b.project, &b.branch)));
+    listed.sort_by(Workspace::listing_order);
 
     if listed.is_empty() {
         println!();

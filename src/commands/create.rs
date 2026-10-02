@@ -5,6 +5,7 @@ use crate::prompt;
 use crate::services::env::PatchResult;
 use crate::services::workspace::{provision, ProvisionInput, ProvisionStep, Status, StepEvent};
 use crate::services::{config, editor};
+use crate::ui::{Row, Table};
 use crate::util::resolve_path;
 
 // ---------------------------------------------------------------------------
@@ -154,14 +155,20 @@ fn render_env_changes(results: &[PatchResult]) -> Vec<String> {
             continue;
         }
         lines.push(format!("    {}:", blue(&result.file)));
-        for change in &result.changes {
-            lines.push(format!(
-                "      {} {} → {}",
-                dim(format!("{:<25}", change.key)),
-                abbreviate_value(&change.from),
-                abbreviate_value(&change.to)
-            ));
-        }
+        let rows: Vec<Row<()>> = result
+            .changes
+            .iter()
+            .map(|change| {
+                let values = format!(
+                    "{} → {}",
+                    abbreviate_value(&change.from),
+                    abbreviate_value(&change.to)
+                );
+                Row::new((), [dim(&change.key), values])
+            })
+            .collect();
+        let table = Table::measure(&rows);
+        lines.extend(rows.iter().map(|r| format!("      {}", table.line(r, ""))));
     }
     lines
 }
@@ -200,14 +207,12 @@ fn run_inner(
                 println!();
                 return Ok(());
             }
-            let aliases: Vec<String> = ship_config.projects.keys().cloned().collect();
-            let items: Vec<String> = ship_config
+            let rows = ship_config
                 .projects
                 .iter()
-                .map(|(alias, p)| format!("{alias}  {}", dim(&p.path)))
+                .map(|(alias, p)| Row::new(alias.clone(), [bold(alias), dim(&p.path)]))
                 .collect();
-            let idx = prompt::select("Select a project", &items)?;
-            aliases[idx].clone()
+            prompt::pick("Select a project", &["PROJECT", "PATH"], rows)?
         }
     };
     let project_config = config::get_project(&project)?;

@@ -46,6 +46,7 @@ pub struct Picker<T> {
     msg: String,
     multi: bool,
     rows: Vec<Row<T>>,
+    header: Option<Row<()>>,
     pull: Option<Pull>,
 }
 
@@ -55,8 +56,15 @@ impl<T> Picker<T> {
             msg: msg.trim_end_matches(':').trim_end().to_string(),
             multi: false,
             rows,
+            header: None,
             pull: None,
         }
+    }
+
+    /// Column titles above the rows. Never selectable; shares the rows' widths.
+    pub fn header(mut self, columns: &[&str]) -> Self {
+        self.header = Some(Row::new((), columns.iter().map(dim)));
+        self
     }
 
     /// Checkboxes instead of a single choice. Enter returns every checked row.
@@ -138,9 +146,8 @@ impl<T> Picker<T> {
             (true, true) => format!("{} selected", picked.len()),
             (true, false) => picked
                 .first()
-                .and_then(|r| r.cell(0))
-                .unwrap_or("cancelled")
-                .to_string(),
+                .map(summarize)
+                .unwrap_or_else(|| "cancelled".to_string()),
         };
         io(term.write_line(&format!("  {} {}", bold(&msg), dim(summary))))?;
         Ok(picked)
@@ -207,11 +214,13 @@ impl<T> Picker<T> {
         drawn: usize,
     ) -> Result<usize> {
         let (height, width) = term.size();
-        // Header, both scroll hints and the help line sit outside the window.
+        // Title, column header, both scroll hints and the help line sit
+        // outside the window.
+        let chrome = 4 + usize::from(self.header.is_some());
         let window = self
             .rows
             .len()
-            .min((height as usize).saturating_sub(4).max(3));
+            .min((height as usize).saturating_sub(chrome).max(3));
         if cursor < *offset {
             *offset = cursor;
         }
@@ -219,8 +228,9 @@ impl<T> Picker<T> {
             *offset = cursor + 1 - window;
         }
 
-        let table = Table::measure(&self.rows);
+        let table = self.table();
         let mut lines = vec![format!("  {}", bold(&self.msg))];
+        lines.extend(self.header_line(&table));
         if *offset > 0 {
             lines.push(format!("  {}", dim(format!("↑ {} more", offset))));
         }
@@ -254,6 +264,21 @@ impl<T> Picker<T> {
         Ok(lines.len())
     }
 
+    fn table(&self) -> Table {
+        let table = Table::measure(&self.rows);
+        match &self.header {
+            Some(header) => table.widen(header),
+            None => table,
+        }
+    }
+
+    /// Indented past the pointer and checkbox so titles sit over their column.
+    fn header_line(&self, table: &Table) -> Option<String> {
+        let header = self.header.as_ref()?;
+        let gutter = if self.multi { "        " } else { "    " };
+        Some(format!("{gutter}{}", table.line(header, "")))
+    }
+
     fn mark(&self, checked: bool) -> String {
         match (self.multi, checked) {
             (false, _) => String::new(),
@@ -273,8 +298,11 @@ impl<T> Picker<T> {
     /// Piped or scripted: show what would have been offered, pick nothing.
     /// Waiting on a keypress nobody can send would hang the run.
     fn render_static(&self, term: &Term) -> Result<()> {
-        let table = Table::measure(&self.rows);
+        let table = self.table();
         io(term.write_line(&format!("  {}", bold(&self.msg))))?;
+        if let Some(line) = self.header_line(&table) {
+            io(term.write_line(&line))?;
+        }
         for row in &self.rows {
             io(term.write_line(&format!(
                 "    {}{}",
@@ -284,6 +312,17 @@ impl<T> Picker<T> {
         }
         Ok(())
     }
+}
+
+/// A single pick echoes its whole row, so a multi-column row (project, branch)
+/// still reads as what was chosen. Styling is dropped; the summary is dimmed.
+fn summarize<T>(row: &Row<T>) -> String {
+    row.cells
+        .iter()
+        .flatten()
+        .map(|c| console::strip_ansi_codes(c).into_owned())
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 fn io<T>(r: std::io::Result<T>) -> Result<T> {

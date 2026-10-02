@@ -65,6 +65,20 @@ impl Table {
         Table { widths }
     }
 
+    /// Grows the widths to fit a row measured apart from the rest, such as a
+    /// header whose value type differs from the rows below it.
+    pub fn widen<T>(mut self, row: &Row<T>) -> Self {
+        if self.widths.len() < row.cells.len() {
+            self.widths.resize(row.cells.len(), 0);
+        }
+        for (c, width) in self.widths.iter_mut().enumerate() {
+            if let Some(text) = row.cell(c) {
+                *width = (*width).max(measure_text_width(text));
+            }
+        }
+        self
+    }
+
     /// The trailing cell is never padded — nothing follows it to line up with.
     pub fn line<T>(&self, row: &Row<T>, spinner: &str) -> String {
         let last = row.cells.len().saturating_sub(1);
@@ -108,6 +122,15 @@ mod tests {
         ];
         let table = Table::measure(&rows);
         assert_eq!(table.line(&rows[0], "·"), "\x1b[1mapi\x1b[0m       main");
+    }
+
+    #[test]
+    fn widen_fits_a_wider_header() {
+        let rows = vec![row(&["api", "main"])];
+        let header = row(&["PROJECT", "BRANCH"]);
+        let table = Table::measure(&rows).widen(&header);
+        assert_eq!(table.line(&rows[0], "·"), "api      main");
+        assert_eq!(table.line(&header, "·"), "PROJECT  BRANCH");
     }
 
     #[test]

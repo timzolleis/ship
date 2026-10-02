@@ -227,6 +227,14 @@ pub struct Workspace {
     pub created: String,
 }
 
+impl Workspace {
+    /// How every listing orders workspaces: one block per project, branches
+    /// alphabetical inside it. The registry itself stays in creation order.
+    pub fn listing_order(a: &Self, b: &Self) -> std::cmp::Ordering {
+        (&a.project, &a.branch).cmp(&(&b.project, &b.branch))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Update cache
 // ---------------------------------------------------------------------------

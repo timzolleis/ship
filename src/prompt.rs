@@ -47,14 +47,12 @@ pub fn multi_select(msg: &str, items: &[(String, bool)]) -> Result<Vec<usize>> {
     Ok(picked.into_iter().map(|r| r.value).collect())
 }
 
-pub fn select(msg: &str, items: &[String]) -> Result<usize> {
-    let rows = items
-        .iter()
-        .enumerate()
-        .map(|(i, label)| Row::new(i, [label.clone()]))
-        .collect();
-    let picked = Picker::new(msg, rows).interact()?;
-    picked
+/// Single choice over rows of columns, titled by `header`. Returns the picked
+/// row's value, so callers never map an index back to their data.
+pub fn pick<T>(msg: &str, header: &[&str], rows: Vec<Row<T>>) -> Result<T> {
+    Picker::new(msg, rows)
+        .header(header)
+        .interact()?
         .into_iter()
         .next()
         .map(|r| r.value)

@@ -2,6 +2,7 @@ use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, red, yellow};
 use crate::schema::{EnvVarType, ProjectConfig};
 use crate::services::config;
+use crate::ui::{Live, Row, Table};
 use crate::util::cwd_string;
 
 #[derive(clap::Subcommand)]
@@ -197,13 +198,13 @@ fn show(alias: Option<String>, all: bool) -> Result<()> {
         };
 
     for (alias, project) in &selected {
-        print_project(alias, project, &lines);
+        print_project(alias, project, &lines)?;
     }
     print_legend();
     Ok(())
 }
 
-fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
+fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) -> Result<()> {
     let project_line = lines
         .line_of(&["projects", alias])
         .map(|l| format!("line {l}"))
@@ -219,7 +220,7 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
 
     if project.env.files.is_empty() {
         println!("  {}", dim("No .env files configured."));
-        return;
+        return Ok(());
     }
 
     // A config still on the flat `autoDetected` shape has no per-file keys to
@@ -227,41 +228,10 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
     // every file repeats it.
     let mut flat_shape = false;
 
-    let file_width = project
-        .env
-        .files
-        .keys()
-        .map(|f| f.len())
-        .max()
-        .unwrap_or(0)
-        .max(8);
-    let key_width = project
-        .env
-        .files
-        .values()
-        .flat_map(|vars| vars.keys())
-        .map(|k| k.len())
-        .max()
-        .unwrap_or(0)
-        .max(3);
-    let handling_width = EnvVarType::ALL
-        .iter()
-        .map(|t| t.label().len())
-        .max()
-        .unwrap_or(0);
-
-    println!();
-    println!(
-        "  {:<file_width$}  {:<key_width$}  {:<handling_width$}  LINE",
-        "ENV FILE", "VAR", "HANDLING"
-    );
-    println!(
-        "  {}  {}  {}  {}",
-        dim("─".repeat(file_width)),
-        dim("─".repeat(key_width)),
-        dim("─".repeat(handling_width)),
-        dim("────")
-    );
+    let mut rows = vec![Row::new(
+        (),
+        ["ENV FILE", "VAR", "HANDLING", "LINE"].map(dim),
+    )];
 
     for (file, vars) in &project.env.files {
         if vars.is_empty() {
@@ -269,13 +239,15 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
                 .line_of(&["projects", alias, "env", "files", file])
                 .map(|l| l.to_string())
                 .unwrap_or_default();
-            println!(
-                "  {}  {:<key_width$}  {:<handling_width$}  {}",
-                blue(format!("{file:<file_width$}")),
-                "—",
-                dim("copied, nothing rewritten"),
-                dim(line)
-            );
+            rows.push(Row::new(
+                (),
+                [
+                    blue(file),
+                    "—".to_string(),
+                    dim("copied, nothing rewritten"),
+                    dim(line),
+                ],
+            ));
             continue;
         }
 
@@ -297,15 +269,15 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
                 (EnvVarType::DevUrl, Some(p)) => format!("{} {p}", cfg.var_type.label()),
                 _ => cfg.var_type.label().to_string(),
             };
-            println!(
-                "  {}  {:<key_width$}  {:<handling_width$}  {}",
-                blue(format!("{file_cell:<file_width$}")),
-                key,
-                handling,
-                dim(line)
-            );
+            rows.push(Row::new(
+                (),
+                [blue(file_cell), key.clone(), handling, dim(line)],
+            ));
         }
     }
+
+    println!();
+    Live::new(rows).print()?;
 
     if flat_shape {
         println!();
@@ -320,6 +292,7 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) {
     }
 
     print_copy_paths(alias, project, lines);
+    Ok(())
 }
 
 fn print_copy_paths(alias: &str, project: &ProjectConfig, lines: &LineMap) {
@@ -348,12 +321,13 @@ fn print_legend() {
         "  {}",
         dim("Handling — the JSON \"type\" field on each var:")
     );
-    for t in EnvVarType::ALL {
-        println!(
-            "    {}  {}",
-            green(format!("{:<13}", t.json_value())),
-            dim(t.help())
-        );
+    let rows: Vec<Row<()>> = EnvVarType::ALL
+        .iter()
+        .map(|t| Row::new((), [green(t.json_value()), dim(t.help())]))
+        .collect();
+    let table = Table::measure(&rows);
+    for row in &rows {
+        println!("    {}", table.line(row, ""));
     }
     println!();
     println!(

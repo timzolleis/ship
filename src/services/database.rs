@@ -35,7 +35,31 @@ pub fn drop_db(t: DbTarget, db: &str) -> Result<()> {
         .map_err(|e| db_err("drop", db, e))
 }
 
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// A template copy is a server-side file copy, several times faster than a
+/// dump. Postgres refuses it while another session is connected to `source`
+/// (a running dev server on the base checkout), so fall back to dump | restore.
+/// A failed CREATE DATABASE leaves nothing behind, so the fallback starts clean.
 pub fn clone_db(t: DbTarget, source: &str, db: &str) -> Result<()> {
+    let sql = format!(
+        "CREATE DATABASE {} TEMPLATE {}",
+        quote_ident(db),
+        quote_ident(source)
+    );
+    // `-d postgres`: connecting to `source` itself (psql's default when the
+    // user is named like the database) would count as a session on it.
+    if runner::run(
+        t.runtime,
+        "psql",
+        &["-U", t.user, "-d", "postgres", "-c", &sql],
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
     runner::run(t.runtime, "createdb", &["-U", t.user, db])
         .and_then(|_| {
             let script = format!("pg_dump -U {u} {source} | psql -U {u} {db}", u = t.user);
@@ -118,4 +142,15 @@ pub fn query(t: DbTarget, db: &str, sql: &str) -> Result<String> {
 pub fn session(t: DbTarget, db: &str) -> Result<()> {
     runner::run_interactive(t.runtime, "psql", &["-U", t.user, db])
         .map_err(|e| db_err("session", db, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifiers_are_quoted_and_escaped() {
+        assert_eq!(quote_ident("ep_feat"), "\"ep_feat\"");
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+    }
 }

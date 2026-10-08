@@ -11,13 +11,13 @@ Written in Rust. Single ~2 MB static binary, no runtime.
 | Capability | How |
 |---|---|
 | **Isolated worktrees** | `ship create ep tim/ep-241` checks out the branch at `../elternportal-tim-ep-241/` next to your main repo. |
-| **Cloned databases** | Each workspace gets `ep_tim_ep_241`, a `pg_dump \| psql` copy of your source database. Reset it any time. |
+| **Cloned databases** | Each workspace gets `ep_tim_ep_241`, a template copy of your source database (`pg_dump \| psql` when the source is in use). Reset it any time. |
 | **Patched `.env` files** | Database names, proxy origins and callback URLs are rewritten per workspace; everything else is copied verbatim. Handling is configured per file and per variable. |
 | **Local state carried over** | Gitignored files a checkout can't bring (sqlite databases, certs, fixtures) are copied into the new worktree. |
 | **HTTPS for every branch** | A Caddy container serves `https://tim-ep-241.ep.localhost` and proxies to the port ship allocated. Trust the CA once, no browser warnings after. |
 | **Custom command sequences** | Per project: an ordered `install` scope, a `db` scope (migrate, seed) and a `dev` scope. `{port}` is substituted. Blank line ends a scope during `ship init`. |
 | **Idempotent, resumable create** | Every resource is probed first. A create that died halfway picks up where it stopped, and a finished one just re-opens the editor. |
-| **Base kept fresh** | Before a new worktree, ship fetches and fast-forwards your base branch, reinstalls and migrates the source database when HEAD moved. |
+| **Fresh base** | A new worktree branches from the just-fetched `origin/main` (or `origin/<base>`); the main checkout is left alone. |
 | **PR-aware listing and cleanup** | `ship ls` streams PR status from `gh` into the table. `ship gc` preselects workspaces whose PR is merged and tears them down, remote branch included. |
 | **Orphan sweeps** | `gc --databases` drops databases no workspace claims. `gc --sessions` deletes Claude Code and Pi transcripts whose worktree is gone. |
 | **Agent transcript cleanup** | Teardown removes the worktree's coding-agent session directories so transcripts don't pile up for dead branches. Toggle with `ship config sessions off`. |
@@ -183,15 +183,18 @@ What happens, in order:
    before touching anything.
 2. **Register** the workspace in `workspaces.json` first, so a crash later is visible to
    `ship ls` and retryable.
-3. **Sync base.** Fetch and fast-forward `main`, then run the `install` and `db` scopes
-   in the main checkout when HEAD moved. With `--base`, only that ref is fast-forwarded.
-   A dirty or diverged main is a warning, not a stop.
-4. **Worktree** at the configured `dirPattern`, new branch or existing one.
-5. **Database** cloned from the source with `createdb` + `pg_dump | psql`.
-6. **Copy** the project's `copy` paths into the worktree. A missing source is a warning.
-7. **Env.** Each configured `.env` is copied and its variables rewritten. The changes
+3. **Fetch base.** `git fetch`, then pick the start ref: the main checkout's upstream
+   (`origin/main`), or `origin/<base>` with `--base`. The main checkout is not pulled,
+   installed or migrated; that is `ship sync`. A failed fetch is a warning.
+4. **Worktree** at the configured `dirPattern`: an existing branch, or a new one from
+   the start ref, created with `--no-track` so `git push` never targets main.
+5. **Copy** the project's `copy` paths into the worktree. A missing source is a warning.
+6. **Env.** Each configured `.env` is copied and its variables rewritten. The changes
    are printed as a before/after diff.
-8. **Install** and **db** scopes run inside the worktree.
+7. **Database** and **install** run side by side. The database is a
+   `CREATE DATABASE ... TEMPLATE` copy of the source; while anything is connected to the
+   source, Postgres refuses that, and ship falls back to `createdb` + `pg_dump | psql`.
+8. **db** scope runs inside the worktree, migrating the clone.
 9. **Proxy route** is added to the Caddyfile and Caddy is reloaded.
 10. **Editor** opens. The first time, ship asks whether to always do this.
 
@@ -244,8 +247,8 @@ Outside a workspace with no branch given, a picker appears.
 - **`ship db exec "<sql>"`** runs SQL against the current workspace's database without
   knowing its container, user or name. `"\dt"` works too.
 - **`ship sync <project>`** is the base-sync step on its own: fetch, fast-forward main,
-  install and migrate the source database when HEAD moved. `ship create` and
-  `ship gc --sync` call it for you.
+  install and migrate the source database when HEAD moved. `ship gc --sync` calls it
+  for you; `ship create` does not.
 
 ### `ship ls`, `ship projects`, `ship index`
 

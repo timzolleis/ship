@@ -53,6 +53,9 @@ fn remote_branch_exists(repo: &str, branch: &str) -> Result<bool> {
 
 /// Reuses an existing local or remote branch when present; otherwise creates
 /// the branch off `base` (default HEAD). Prunes stale worktree metadata first.
+///
+/// `--no-track`: `base` is usually `origin/main`, and a new branch tracking it
+/// would make a plain `git push` target main.
 pub fn worktree_add(repo: &str, path: &str, branch: &str, base: Option<&str>) -> Result<()> {
     let _ = run(repo, &["worktree", "prune"]);
     let _guard = repo_lock(repo);
@@ -73,6 +76,7 @@ pub fn worktree_add(repo: &str, path: &str, branch: &str, base: Option<&str>) ->
             &[
                 "worktree",
                 "add",
+                "--no-track",
                 "-b",
                 branch,
                 path,
@@ -185,6 +189,37 @@ pub fn rev_parse(repo: &str, reference: &str) -> Result<String> {
         .to_string())
 }
 
+/// The ref a new branch starts from, read after a fetch so it is current
+/// without touching any checkout: `origin/<base>` when the remote has it, else
+/// the local `base`; with no base, the main checkout's upstream (`origin/main`),
+/// else its HEAD.
+pub fn resolve_base(repo: &str, base: Option<&str>) -> String {
+    match base {
+        Some(b) => {
+            let remote = format!("origin/{b}");
+            let full = format!("refs/remotes/{remote}");
+            if run(repo, &["rev-parse", "--verify", "--quiet", &full]).is_ok() {
+                remote
+            } else {
+                b.to_string()
+            }
+        }
+        None => run(
+            repo,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "HEAD@{upstream}",
+            ],
+        )
+        .map(|r| r.stdout.trim().to_string())
+        .ok()
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string()),
+    }
+}
+
 /// Fast-forward a local branch ref to match origin (works for
 /// non-checked-out branches).
 pub fn update_branch(repo: &str, branch: &str) -> Result<()> {
@@ -249,6 +284,35 @@ mod tests {
         );
         run(&work, &["branch", "feat"]).unwrap();
         assert_eq!(delete_branch(&work, "feat").unwrap(), Removal::Removed);
+    }
+
+    // The bug this guards: branching from a stale local main. A new branch must
+    // start at the fetched origin/main and must not track it.
+    #[test]
+    fn a_new_branch_starts_at_the_upstream_without_tracking_it() {
+        let work = repo("base-upstream");
+        run(&work, &["commit", "--allow-empty", "-m", "remote only"]).unwrap();
+        run(&work, &["push", "origin", "main"]).unwrap();
+        run(&work, &["reset", "--hard", "HEAD~1"]).unwrap();
+
+        let base = resolve_base(&work, None);
+        assert_eq!(base, "origin/main");
+
+        let tree = format!("{work}-feat");
+        worktree_add(&work, &tree, "feat", Some(&base)).unwrap();
+        assert_eq!(
+            rev_parse(&work, "feat").unwrap(),
+            rev_parse(&work, "origin/main").unwrap()
+        );
+        assert!(run(&work, &["rev-parse", "feat@{upstream}"]).is_err());
+    }
+
+    #[test]
+    fn a_base_missing_on_the_remote_stays_local() {
+        let work = repo("base-local");
+        run(&work, &["branch", "local-only"]).unwrap();
+        assert_eq!(resolve_base(&work, Some("local-only")), "local-only");
+        assert_eq!(resolve_base(&work, Some("main")), "origin/main");
     }
 
     #[test]

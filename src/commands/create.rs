@@ -75,23 +75,13 @@ fn render_event(e: &StepEvent<ProvisionStep>, ctx: &RenderContext) -> Vec<String
             if e.status != Status::Done {
                 return vec![];
             }
-            let detail = e.detail.as_deref().unwrap_or("");
-            if detail.is_empty() {
-                return vec![];
+            // detail = the fetched ref the branch starts from, e.g. origin/main
+            match e.detail.as_deref() {
+                Some(base) if !base.is_empty() => {
+                    vec![ok_line("Base", &format!("{} {}", base, dim("(fetched)")))]
+                }
+                _ => vec![],
             }
-            if detail == "already up to date" {
-                return vec![dim("  · Base           already up to date")];
-            }
-            // detail = "<label> fast-forwarded" optionally "; migrated <source>"
-            let (updated, migrated) = match detail.split_once("; migrated ") {
-                Some((u, m)) => (u, Some(m)),
-                None => (detail, None),
-            };
-            let mut lines = vec![ok_line("Base updated", updated)];
-            if let Some(m) = migrated {
-                lines.push(ok_line("Base migrated", m));
-            }
-            lines
         }
         ProvisionStep::Worktree => {
             if e.status == Status::SkippedExisting {

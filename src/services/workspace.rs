@@ -8,7 +8,6 @@ use crate::services::copy::{self, CopyOutcome, CopyStatus};
 use crate::services::database::{self, DbTarget};
 use crate::services::env::{self, PatchResult};
 use crate::services::shell::{self, NON_INTERACTIVE_ENV};
-use crate::services::sync::{self, SyncResult};
 use crate::services::{agent, config, git, proxy};
 use crate::util::resolve_path;
 use std::sync::mpsc;
@@ -166,22 +165,6 @@ fn today_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
-// Summarize a successful base sync into the sync-base step's detail:
-// head-moved → "<label> fast-forwarded" (plus "; migrated <source>" when
-// migrations ran); otherwise "already up to date".
-fn sync_summary(r: &SyncResult, base_branch: Option<&str>, source: &str) -> String {
-    let label = base_branch.unwrap_or("main");
-    if r.head_moved {
-        let base = format!("{label} fast-forwarded");
-        return if r.migrated {
-            format!("{base}; migrated {source}")
-        } else {
-            base
-        };
-    }
-    "already up to date".to_string()
-}
-
 // -- provision --------------------------------------------------------------
 
 pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
@@ -276,41 +259,34 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         None,
     ));
 
-    // 8a. sync-base (skip when worktree already on disk).
+    // 8a. base: fetch, then branch from the fetched ref. The base checkout is
+    // never pulled, installed, or migrated here — the workspace's own db scope
+    // migrates its clone, and `ship sync` updates the base checkout.
     if worktree_exists {
         events.push(step(ProvisionStep::SyncBase, Status::SkippedExisting, None));
-    } else {
-        match sync::sync(pc, input.base_branch) {
-            Ok(r) => events.push(step(
-                ProvisionStep::SyncBase,
-                Status::Done,
-                Some(sync_summary(&r, input.base_branch, &pc.database.source)),
-            )),
-            Err(e) => events.push(step(
-                ProvisionStep::SyncBase,
-                Status::Warning,
-                Some(e.to_string()),
-            )),
-        }
-    }
-
-    // 8b. worktree.
-    if worktree_exists {
         events.push(step(ProvisionStep::Worktree, Status::SkippedExisting, None));
     } else {
-        git::worktree_add(&pc.path, &worktree_dir, branch, input.base_branch)?;
+        let fetched = git::fetch(&pc.path);
+        let base_ref = git::resolve_base(&pc.path, input.base_branch);
+        events.push(match fetched {
+            Ok(()) => step(
+                ProvisionStep::SyncBase,
+                Status::Done,
+                Some(base_ref.clone()),
+            ),
+            Err(e) => step(
+                ProvisionStep::SyncBase,
+                Status::Warning,
+                Some(format!("fetch failed, branching from {base_ref}: {e}")),
+            ),
+        });
+
+        // 8b. worktree.
+        git::worktree_add(&pc.path, &worktree_dir, branch, Some(&base_ref))?;
         events.push(step(ProvisionStep::Worktree, Status::Done, None));
     }
 
-    // 8c. database (clone from pc.database.source).
-    if db_exists {
-        events.push(step(ProvisionStep::Database, Status::SkippedExisting, None));
-    } else {
-        database::clone_db(target, &pc.database.source, &names.db_name)?;
-        events.push(step(ProvisionStep::Database, Status::Done, None));
-    }
-
-    // 8d. copy local state. Before install/db so migrations and seeds see it.
+    // 8c. copy local state. Before install/db so migrations and seeds see it.
     if !pc.copy.is_empty() {
         let outcomes = copy::copy_paths(&pc.path, &worktree_dir, &pc.copy)?;
         events.push(step(
@@ -320,7 +296,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         ));
     }
 
-    // 8e. env.
+    // 8d. env.
     let env_changes = env::patch_env_files(
         &pc.path,
         &worktree_dir,
@@ -338,11 +314,30 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         Some(format!("{change_count} changes")),
     ));
 
-    // 8f. install / db scopes (only when configured).
-    if !pc.commands.install.is_empty() {
-        run_scope(&worktree_dir, &pc.commands.install)?;
+    // 8e. database clone and install scope, side by side: neither reads the
+    // other's output; only the db scope needs both. The clone captures its
+    // output, so the install's streamed output stays readable.
+    let (cloned, installed) = std::thread::scope(|s| {
+        let clone = (!db_exists)
+            .then(|| s.spawn(|| database::clone_db(target, &pc.database.source, &names.db_name)));
+        let installed = (!pc.commands.install.is_empty())
+            .then(|| run_scope(&worktree_dir, &pc.commands.install));
+        let cloned = clone.map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)));
+        (cloned, installed)
+    });
+    match cloned {
+        None => events.push(step(ProvisionStep::Database, Status::SkippedExisting, None)),
+        Some(r) => {
+            r?;
+            events.push(step(ProvisionStep::Database, Status::Done, None));
+        }
+    }
+    if let Some(r) = installed {
+        r?;
         events.push(step(ProvisionStep::Install, Status::Done, None));
     }
+
+    // 8f. db scope (only when configured).
     if !pc.commands.db.is_empty() {
         run_scope(&worktree_dir, &pc.commands.db)?;
         events.push(step(ProvisionStep::Db, Status::Done, None));

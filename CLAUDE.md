@@ -34,6 +34,7 @@ src/
 ├── domain/              # Pure logic — no IO, no subprocesses
 │   ├── caddyfile.rs     # Route codec + next_port allocation
 │   ├── db_orphans.rs    # Databases matching a project pattern that no workspace claims
+│   ├── detect.rs        # What init may conclude from a repo: package manager, commands, env kinds, database
 │   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url)
 │   ├── removal.rs       # Removed vs AlreadyGone — a teardown step's two successes
 │   ├── remote_branch.rs # Safe default vs explicit remote-branch deletion policy
@@ -46,6 +47,7 @@ src/
 │   ├── git.rs           # Worktree/branch ops over shell
 │   ├── github.rs        # PR lookup via gh CLI (parallel) + shared PR label
 │   ├── database.rs      # Postgres CLI ops (createdb/dropdb/psql/pg_dump) over runner
+│   ├── detect.rs        # Reads a repo for init: .env files, lockfiles, package.json, ignored state, docker ports
 │   ├── config.rs        # ~/.config/ship/ config + workspace registry (self-migrating load)
 │   ├── copy.rs          # Copies gitignored local state into a new worktree
 │   ├── proxy.rs         # Caddy reverse proxy via docker
@@ -57,12 +59,14 @@ src/
 │   └── workspace.rs     # Orchestrator: provision / teardown / reset state machines
 └── commands/            # One module per subcommand; owns rendering + error printing
     └── teardown.rs      # Not a subcommand: shared teardown checklist for `down` and `gc`
+skills/ship/SKILL.md     # Agent skill, embedded in the binary (`ship skill [install]`)
 ```
 
 ## Key Conventions
 
 - **Layering**: commands → services → domain. Domain modules are pure (no IO); services do IO through `shell`/`runner`; commands only render and prompt. Don't shell out from commands directly. `ui/` is presentation only — it never learns what a workspace or a PR is; callers map their own values into `Update`s.
-- **Errors**: one `Error` variant per failure mode in `src/errors.rs`, with the user-facing message in `#[error(...)]`. Commands catch at their boundary and print (`eprintln!("\n  {} {}\n", red("Error:"), e)` or command-specific formats) — they don't propagate to `main`.
+- **Errors**: one `Error` variant per failure mode in `src/errors.rs`, with the user-facing message in `#[error(...)]`. Commands catch at their boundary and print (`commands::finish` for the shared `Error:` format, or command-specific formats) — they don't propagate to `main`.
+- **Exit codes**: every command's `run` returns `ExitCode`, and any failure is `FAILURE` — agents read the status, not the text. A failure path never prints `✗` and returns `Ok`; it returns an `Error`. `down`/`gc` return `Result<ExitCode>` (`commands::finish_with`) because a summary can be printed and still mean part of it failed. A human cancelling a picker or confirm is a success.
 - **Nonzero exits**: `shell::exec` (captured) fails on nonzero exit; `exec_interactive`/`exec_in_dir` (inherited stdio) deliberately do NOT — only spawn failures error. A failing dev server must not fail `ship up`.
 - **Formatting**: import from `src/fmt.rs`. Never define local ANSI helpers. Color is dropped automatically when stdout isn't a TTY or `NO_COLOR` is set.
 - **Aligned columns**: build `ui::Row`s and let `ui::Table` measure them. It ignores ANSI codes, so cells may arrive pre-colored. Hand-rolled `{:<22}` padding breaks on long values — that's what it replaced. Every listing and picker titles its columns the way `ship ls` does: a dimmed uppercase header row, no `───` rules. `Picker::header` lines titles up past the pointer and checkbox; a static table measures its header with `Table::widen`.
@@ -77,15 +81,19 @@ src/
 - **Env rewriting**: `env.files` maps each .env path to its own vars, because one name needs different handling per package (shared postgres `DATABASE_URL` gets rewritten, a worktree-relative sqlite one is `plain`). The pre-per-file flat `autoDetected` shape still decodes by fanning every var out to every file. `ship config show` reports the stored handling with on-disk line numbers.
 - **Agent sessions**: every harness stores transcripts in one dir per project path, flattening `/` to `-` — `services::agent::STORES` lists the roots. The flattening is lossy, so a name only proves which path it means when that path exists: `session_slug::resolve` tries each `-` both ways and prunes against the filesystem. `gc --sessions` only considers names under a project's worktree prefix and only deletes ones no live path claims. Teardown skips the step when `deleteAgentSessions` is false.
 - **Workspace state has three sources**: tracked files come from the git checkout, postgres from `database::clone_db`, and file-backed state (sqlite, certs, fixtures) from `copy::copy_paths` over the project's `copy` list. `init` proposes copy paths only when git ignores them — tracked files already arrive with the checkout.
-- **Prompts**: through `src/prompt.rs` only (it strips trailing `:` — dialoguer adds its own). A single choice is `prompt::pick(msg, header, rows)`, which returns the picked row's value. Reach for `ui::Picker` directly only for checkboxes, streaming cells, or the picked row's cells.
+- **Optional database**: `ProjectConfig.database` and `Workspace.db_name` are `Option`. Without a database, `create`, teardown and `sync` skip their database steps; `reset`, `db exec` and `open db` fail with `Error::NoDatabase`. The local runtime runs the Postgres CLI against the default server, so it only reaches `localhost:5432`.
+- **`--json`**: `ls`, `projects` and `config show` print through `commands::print_json` — JSON on stdout and nothing else.
+- **Prompts**: through `src/prompt.rs` only (it strips trailing `:` — dialoguer adds its own). A single choice is `prompt::pick(msg, header, rows, hint)`, which returns the picked row's value. Reach for `ui::Picker` directly only for checkboxes, streaming cells, or the picked row's cells.
+- **Unattended mode**: `ui::interactive()` (stdin and stderr are terminals) is the one switch. Without a terminal every prompt answers itself: `input` takes its default, `confirm` takes `Unattended::Answer(bool)` or fails with `Unattended::Require(hint)`, pickers fail. A failure is `Error::NeedsInput` naming the flag or argument that answers the prompt. A prompt with no safe answer gets a `Require` — never a guess.
+- **Never guess**: `init` writes a field only from evidence (`domain::detect`); with none it stays empty and lands in the `Left empty` report with the reason. No hardcoded fallbacks for project facts (commands, database, ports) — a failed lookup is an error, not a default.
 - **Editor opening**: always `editor::open()`, never exec an editor directly.
-- **Config JSON**: camelCase keys, 2-space pretty print, trailing newline. `IndexMap` preserves key order. Legacy `database.container` shape is decoded and canonically written back on load — keep that tolerance.
+- **Config JSON**: camelCase keys, 2-space pretty print, trailing newline. `IndexMap` preserves key order. Legacy shapes decode through a repr and are written back canonically on the next save — flat `env.autoDetected` (`EnvConfigRepr`) and `worktree.dbNamePattern` (`ProjectConfigRepr`, moved into `database.namePattern`). Keep that tolerance.
 - **Versioning**: `build.rs` embeds the git short SHA (or `$SHIP_VERSION` when set — CI uses this to pin the binary version to the release tag). Debug builds report `dev`, which disables update checks and self-update.
 - **Clippy after every change**: `cargo clippy` must stay warning-free.
 
 ## Error Variants (src/errors.rs)
 
-`ProjectNotFound`, `ParseConfig`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `Prompt`.
+`ProjectNotFound`, `ParseConfig`, `ConfigOutdated`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `NoProjects`, `NotInWorkspace`, `NotInProject`, `UnknownTarget`, `NeedsInput`, `NoDatabase`, `Prompt`.
 
 ## Config Storage
 

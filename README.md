@@ -15,7 +15,7 @@ Written in Rust. Single ~2 MB static binary, no runtime.
 | **Patched `.env` files** | Database names, proxy origins and callback URLs are rewritten per workspace; everything else is copied verbatim. Handling is configured per file and per variable. |
 | **Local state carried over** | Gitignored files a checkout can't bring (sqlite databases, certs, fixtures) are copied into the new worktree. |
 | **HTTPS for every branch** | A Caddy container serves `https://tim-ep-241.ep.localhost` and proxies to the port ship allocated. Trust the CA once, no browser warnings after. |
-| **Custom command sequences** | Per project: an ordered `install` scope, a `db` scope (migrate, seed) and a `dev` scope. `{port}` is substituted. Blank line ends a scope during `ship init`. |
+| **Custom command sequences** | Per project: an ordered `install` scope, a `db` scope (migrate, seed) and a `dev` scope. `PORT` is set and `{port}` is substituted. Blank line ends a scope during `ship init`. |
 | **Idempotent, resumable create** | Every resource is probed first. A create that died halfway picks up where it stopped, and a finished one just re-opens the editor. |
 | **Fresh base** | A new worktree branches from the just-fetched `origin/main` (or `origin/<base>`); the main checkout is left alone. |
 | **PR-aware listing and cleanup** | `ship ls` streams PR status from `gh` into the table. `ship gc` preselects workspaces whose PR is merged and tears them down, remote branch included. |
@@ -23,7 +23,8 @@ Written in Rust. Single ~2 MB static binary, no runtime.
 | **Agent transcript cleanup** | Teardown removes the worktree's coding-agent session directories so transcripts don't pile up for dead branches. Toggle with `ship config sessions off`. |
 | **Editor integration** | Detects `$VISUAL`/`$EDITOR`, then Zed, Cursor, VS Code, Sublime, then nvim/vim/vi. Remembers what worked. |
 | **Self-updating** | `ship update` swaps the binary for the latest GitHub release. A background check runs at most hourly and prints a one-line notice when you're behind. |
-| **Scriptable** | Color drops when stdout isn't a TTY or `NO_COLOR` is set. Pickers print their rows and exit when stdin isn't a terminal. `ship init` takes every answer as a flag. |
+| **Agent-ready** | Without a terminal every prompt takes its safe default or exits 1 naming the flag to pass; every failure exits nonzero. `ls`, `projects` and `config show` take `--json`. `ship skill install` installs an agent skill that matches the binary. Color drops when stdout isn't a TTY or `NO_COLOR` is set. |
+| **Never guesses** | `ship init` fills a field only from evidence in the repo and lists what it left empty, with the reason. Projects without Postgres work: every database step skips. |
 
 ## Install
 
@@ -57,7 +58,7 @@ version `dev` and never self-update.
 ## Quick start
 
 ```bash
-# 1. Register a project (run inside the repo, answer a few prompts)
+# 1. Register a project (run inside the repo; confirm what it detected)
 cd ~/IdeaProjects/elternportal
 ship init
 
@@ -80,10 +81,10 @@ ship gc                     # or: ship down ep tim/ep-241
 
 ```
 Project setup
-  ship init                             Register the current directory (interactive)
-  ship init --alias ep --dev-cmd ...    Same, non-interactive
-  ship projects                         List registered projects
-  ship config show [alias] [--all]      Show env handling and copy paths with file line numbers
+  ship init                             Register the current directory (detects, then asks)
+  ship init --alias ep --dev-cmd ...    Override what it detects
+  ship projects [--json]                List registered projects
+  ship config show [alias] [--all] [--json]  Show env handling and copy paths with file line numbers
   ship config sessions [on|off]         Delete agent transcripts on teardown (default on)
 
 Workspace lifecycle
@@ -92,7 +93,7 @@ Workspace lifecycle
   ship down [project] [branch]          Tear down (cwd workspace, or a picker)
   ship down --force                     Skip confirmation and dirty-worktree checks
   ship down --db-only                   Drop the database and route, keep the worktree
-  ship ls [project] [--no-pr]           List workspaces (PR status streams in)
+  ship ls [project] [--no-pr] [--json]  List workspaces (PR status streams in)
   ship index [project] [--all] [--dry-run]   Register worktrees created outside ship
 
 Day to day
@@ -117,44 +118,57 @@ Proxy
   ship proxy next-port                  Print the next free port
 
   ship update                           Install the latest release
+
+Agents
+  ship skill                            Print the agent skill
+  ship skill install [--dir <path>]     Write it to ~/.agents/skills/ship/SKILL.md
 ```
 
 ## Commands in detail
 
 ### `ship init`
 
-Run inside the repository. Registers it under an alias and walks through:
+Run inside the repository. Registers it under an alias and walks through what it
+detected. It never guesses: a field is filled only from evidence in the repo, and
+anything it couldn't tell is left empty and listed at the end with the reason.
 
 1. **Alias and path.** Defaults to the first three letters of the directory name.
-2. **`.env` detection.** Every `.env` outside `node_modules`, `dist`, `.next` and friends is
-   scanned. Variables are proposed with a handling based on their name and value:
+2. **`.env` detection.** Every `.env` and `.env.*` (not `.example`, `.sample`, `.template`)
+   outside `node_modules`, `dist`, `.next` and friends is scanned. Variables are proposed
+   with a handling based on their name and value:
 
    | Variable | Value | Proposed handling |
    |---|---|---|
-   | `DATABASE_URL`, `*_DATABASE_URL` | any | `database_url` — swap the trailing `/name` |
+   | `DATABASE_URL`, `*_DATABASE_URL` | a Postgres URL | `database_url` — swap the trailing `/name` |
    | `*_URL` | contains `.localhost` | `proxy_url` — swap the origin for the workspace domain |
    | `*_CALLBACK_URL` | starts with `http://localhost` | `dev_url` — replace with `http://localhost:{port}<path>` |
 
    Confirm the table with enter, or pick individual rows to change. `plain` copies a
    value untouched, which is what a worktree-relative sqlite `DATABASE_URL` needs.
    Handling is stored per file, so the same variable name can be rewritten in one
-   package and left alone in another. Choices you made before survive a re-run.
+   package and left alone in another. Choices you made before survive a re-run. A
+   gitignored env file with nothing to rewrite is still listed, so it gets copied.
 3. **Local state.** Gitignored `.db`, `.sqlite`, `.pem`, `.key`, `.crt` files are proposed
    for the project's `copy` list, as their containing directory when that is itself
    ignored (so a sqlite file travels with its `-wal`/`-shm` siblings). Sizes are shown
    before you tick them.
-4. **Database.** User, host, port and source database are inferred from the first
-   Postgres `DATABASE_URL`. You confirm the Docker container name to run the Postgres
-   CLI tools in.
-5. **Command scopes.** Three ordered lists, each ending on a blank line:
-   - `install` runs after the worktree exists (`pnpm install`, `pnpm db generate`, ...)
-   - `db` runs after the database is cloned and on `ship reset` (`pnpm db migrate:deploy`, seeds, ...)
-   - `dev` runs on `ship up`; the last entry is the long-running server, `{port}` is replaced
+4. **Database.** User, host, port and source database come from the Postgres
+   `DATABASE_URL`s, which must agree. The Docker container is the one publishing that
+   port (running or stopped); with none, the `local` runtime, which only reaches
+   `localhost:5432`. No Postgres URL, disagreeing URLs, or an unanswering Docker — no
+   database, and every database step skips.
+5. **Command scopes.** Three ordered lists, each ending on a blank line. Seeded from the
+   repo root: the package manager from `packageManager` or the one lockfile,
+   `prisma/schema.prisma` or `drizzle.config.*` for migrations, the `dev` script.
+   - `install` runs after the worktree exists (`pnpm install`, ...)
+   - `db` runs after the database is cloned and on `ship reset` (`pnpm exec prisma migrate deploy`, seeds, ...)
+   - `dev` runs on `ship up`; the last entry is the long-running server. `PORT` is set and `{port}` is replaced
 6. **Root route.** `https://<alias>.localhost` is registered for the main checkout, so
    `ship up` from the project root works too.
 
 Re-running `ship init` on a known alias updates it. Every prompt defaults to the
-stored value. Non-interactive:
+stored value. Without a terminal it takes what it detected (or stored); flags win over
+both:
 
 ```bash
 ship init --alias ep --path . \
@@ -213,7 +227,7 @@ already gone.
   `--force` skips the picker and takes exactly the merged set. `--sync` fast-forwards
   and migrates the affected projects afterwards.
 - **`ship gc --databases`** lists every database on each project's server that matches
-  its `dbNamePattern` but is claimed by no workspace, with sizes, and lets you drop
+  its `database.namePattern` but is claimed by no workspace, with sizes, and lets you drop
   them. Nothing is pre-checked. An unreachable server is skipped, not treated as empty.
 - **`ship gc --sessions`** finds coding-agent transcript directories whose flattened
   path falls under a project's worktree prefix but no longer exists on disk. Only paths
@@ -225,7 +239,8 @@ All three modes accept `--dry-run`.
 
 Run inside a workspace or the project root. Starts the proxy container if it isn't
 running, ensures the route, prints the URL, then runs the `dev` scope in order. All
-but the last command run to completion; the last one is the server and blocks.
+but the last command run to completion; the last one is the server and blocks. Every
+command gets `PORT` set to the workspace port.
 `--open` opens the browser two seconds in. A dev server that exits nonzero does not
 fail `ship up`.
 
@@ -253,8 +268,13 @@ Outside a workspace with no branch given, a picker appears.
 ### `ship ls`, `ship projects`, `ship index`
 
 - **`ship ls [project]`** prints project, branch, port and PR. The table draws at once and
-  each PR cell swaps in as `gh` answers. `--no-pr` skips the lookup.
+  each PR cell swaps in as `gh` answers. `--no-pr` skips the lookup. `--json` prints each
+  workspace as stored plus `pr` (waiting for `gh`).
 - **`ship projects`** lists registered aliases with their paths and database containers.
+  `--json` prints alias, path, domain, port and whether it has a database.
+- **`ship config show --json`** prints the stored config of the current project (or
+  `alias`, or `--all`; outside a project, every project). It fails when `config.json`
+  does not parse, which makes it the check after a hand edit.
 - **`ship index`** finds worktrees under a project that ship didn't create, derives their
   database name and domain from the project's patterns, reports whether the database
   and route already exist, and registers them so `ls`, `down` and `gc` see them.
@@ -378,7 +398,8 @@ All state lives in `~/.config/ship/`:
         "user": "dashboard",
         "source": "dashboard",
         "host": "localhost",
-        "port": 5432
+        "port": 5432,
+        "namePattern": "ep_{branch_slug_safe}"
       },
       "commands": {
         "install": ["pnpm install", "pnpm db generate"],
@@ -401,8 +422,7 @@ All state lives in `~/.config/ship/`:
       "copy": ["development/sqlite-data", "certs/localhost.pem"],
       "worktree": {
         "dirPattern": "../elternportal-{branch_slug}/",
-        "proxyDomainPattern": "{branch_slug}.ep.localhost",
-        "dbNamePattern": "ep_{branch_slug_safe}"
+        "proxyDomainPattern": "{branch_slug}.ep.localhost"
       }
     }
   }
@@ -410,9 +430,9 @@ All state lives in `~/.config/ship/`:
 ```
 
 `database.runtime` can also be `{ "_tag": "local" }` to run the Postgres CLI tools on
-the host instead of inside a container. Older configs with a flat `env.autoDetected`
-map or a bare `database.container` string are still read and rewritten to the current
-shape on the next save.
+the host instead of inside a container. Leave `database` out for a project without
+Postgres. Older configs with a flat `env.autoDetected` map or a `worktree.dbNamePattern`
+are still read and rewritten to the current shape on the next save.
 
 ### Agent sessions
 

@@ -14,7 +14,6 @@ use commands::config::ConfigCmd;
 use commands::db::DbCmd;
 use commands::init::InitArgs;
 use commands::proxy::ProxyCmd;
-use commands::skill::SkillCmd;
 use fmt::{blue, bold, dim};
 use std::process::ExitCode;
 
@@ -141,11 +140,6 @@ enum Cmd {
     },
     /// Download and install the latest release
     Update,
-    /// Print the agent skill for ship, or install it
-    Skill {
-        #[command(subcommand)]
-        cmd: Option<SkillCmd>,
-    },
     /// Background update-cache refresh worker (best-effort, errors swallowed)
     #[command(name = "__refresh-update-cache", hide = true)]
     RefreshUpdateCache,
@@ -199,8 +193,7 @@ fn help_text() -> String {
     {update}                        Download and install the latest release
 
   {agents}
-    {skill}                         Print the agent skill for ship
-    {skill} install [--dir <path>]  Install it (default: ~/.agents/skills/ship/)
+    npx skills add timzolleis/ship -g   Install the agent skill (any agent)
     Without a terminal, prompts take their safe default or exit 1 naming the
     flag to pass. Every failure exits nonzero.
 
@@ -250,7 +243,6 @@ fn help_text() -> String {
         gc = blue("gc"),
         update = blue("update"),
         agents = bold("Agents"),
-        skill = blue("skill"),
         options = bold("Options"),
         examples = bold("Examples"),
         d = dim("$"),
@@ -310,7 +302,6 @@ fn dispatch(cmd: Cmd) -> ExitCode {
             remote,
         } => commands::gc::run(force, dry_run, sync, sessions, databases, remote),
         Cmd::Update => commands::update::run(),
-        Cmd::Skill { cmd } => commands::skill::run(cmd),
         Cmd::RefreshUpdateCache => {
             let _ = services::updater::refresh_cache();
             ExitCode::SUCCESS

@@ -59,7 +59,7 @@ src/
 │   └── workspace.rs     # Orchestrator: provision / teardown / reset state machines
 └── commands/            # One module per subcommand; owns rendering + error printing
     └── teardown.rs      # Not a subcommand: shared teardown checklist for `down` and `gc`
-skills/ship/SKILL.md     # Agent skill, embedded in the binary (`ship skill [install]`)
+skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzolleis/ship -g` — keep it in step with the CLI
 ```
 
 ## Key Conventions

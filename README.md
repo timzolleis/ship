@@ -23,7 +23,7 @@ Written in Rust. Single ~2 MB static binary, no runtime.
 | **Agent transcript cleanup** | Teardown removes the worktree's coding-agent session directories so transcripts don't pile up for dead branches. Toggle with `ship config sessions off`. |
 | **Editor integration** | Detects `$VISUAL`/`$EDITOR`, then Zed, Cursor, VS Code, Sublime, then nvim/vim/vi. Remembers what worked. |
 | **Self-updating** | `ship update` swaps the binary for the latest GitHub release. A background check runs at most hourly and prints a one-line notice when you're behind. |
-| **Agent-ready** | Without a terminal every prompt takes its safe default or exits 1 naming the flag to pass; every failure exits nonzero. `ls`, `projects` and `config show` take `--json`. `ship skill install` installs an agent skill that matches the binary. Color drops when stdout isn't a TTY or `NO_COLOR` is set. |
+| **Agent-ready** | Without a terminal every prompt takes its safe default or exits 1 naming the flag to pass; every failure exits nonzero. `ls`, `projects` and `config show` take `--json`. `npx skills add timzolleis/ship -g` installs an agent skill for any agent. Color drops when stdout isn't a TTY or `NO_COLOR` is set. |
 | **Never guesses** | `ship init` fills a field only from evidence in the repo and lists what it left empty, with the reason. Projects without Postgres work: every database step skips. |
 
 ## Install
@@ -120,8 +120,8 @@ Proxy
   ship update                           Install the latest release
 
 Agents
-  ship skill                            Print the agent skill
-  ship skill install [--dir <path>]     Write it to ~/.agents/skills/ship/SKILL.md
+  npx skills add timzolleis/ship -g     Install the agent skill (Pi, Claude Code, Codex, ...)
+  npx skills update                     Refresh it
 ```
 
 ## Commands in detail

@@ -54,4 +54,4 @@ Never invent a value the repo does not show; ask the user.
 
 ## Updating
 
-After `ship update`, run `ship skill install` to refresh this file.
+Installed with `npx skills add timzolleis/ship -g`; refresh it with `npx skills update`.

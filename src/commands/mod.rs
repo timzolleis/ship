@@ -10,7 +10,6 @@ pub mod open;
 pub mod projects;
 pub mod proxy;
 pub mod reset;
-pub mod skill;
 pub mod sync;
 pub mod teardown;
 pub mod up;

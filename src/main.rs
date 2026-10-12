@@ -14,7 +14,9 @@ use commands::config::ConfigCmd;
 use commands::db::DbCmd;
 use commands::init::InitArgs;
 use commands::proxy::ProxyCmd;
+use commands::skill::SkillCmd;
 use fmt::{blue, bold, dim};
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(name = "ship", version = version::VERSION, disable_help_subcommand = true)]
@@ -25,29 +27,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Register current directory as a project
+    /// Register the current directory as a project. Detects env files, commands, and the database; without a terminal it takes what it detected and lists what it left empty
     Init(InitArgs),
     /// List registered projects
-    Projects,
+    Projects {
+        /// Print as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect stored project config
     Config {
         #[command(subcommand)]
         cmd: Option<ConfigCmd>,
     },
-    /// Create or resume a workspace
+    /// Create or resume a workspace: worktree, database clone, patched .env files, HTTPS route
     Create {
+        /// Project alias (see `ship projects`); required without a terminal
         project: Option<String>,
+        /// Branch to check out; created when it does not exist. Required without a terminal
         branch: Option<String>,
-        /// Base branch to create worktree from (defaults to HEAD)
+        /// Base branch for a new branch (default: the main checkout's upstream, e.g. origin/main)
         #[arg(long)]
         base: Option<String>,
     },
-    /// Tear down a workspace
+    /// Tear down a workspace: route, database, worktree, local branch, and the remote branch once its PR is closed or merged
     Down {
+        /// Project alias (default: the workspace containing the current directory)
         project: Option<String>,
+        /// Branch of the workspace to tear down
         branch: Option<String>,
+        /// Skip the confirmation and remove a dirty worktree; required without a terminal
         #[arg(long, short = 'f')]
         force: bool,
+        /// Only drop the workspace database; keep the worktree and branches
         #[arg(long)]
         db_only: bool,
         /// Delete the remote branch regardless of pull-request state
@@ -56,13 +68,18 @@ enum Cmd {
     },
     /// List active workspaces
     Ls {
+        /// Only this project's workspaces
         project: Option<String>,
         /// Skip the pull-request lookup
         #[arg(long)]
         no_pr: bool,
+        /// Print as JSON (waits for the pull-request lookup unless --no-pr)
+        #[arg(long)]
+        json: bool,
     },
-    /// Start dev server + proxy
+    /// Start the dev server behind the HTTPS route, from a workspace or project directory. Blocks until the server exits; ship sets PORT
     Up {
+        /// Open the HTTPS URL in the browser
         #[arg(long)]
         open: bool,
     },
@@ -76,29 +93,40 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<DbCmd>,
     },
-    /// Fetch, pull main, migrate source db
-    Sync { project: String },
-    /// Reset workspace database
+    /// Fetch and fast-forward the project's main checkout; install and migrate when HEAD moved
+    Sync {
+        /// Project alias
+        project: String,
+    },
+    /// Re-clone the current workspace's database from the source and rerun the db commands
     Reset,
-    /// Open editor, browser, or psql
+    /// Open a workspace in the editor, the browser, or psql
     Open {
+        /// `editor`, `url`, `db`, or a branch (then the target follows; default: editor)
         first: Option<String>,
+        /// Target after a branch: editor, url, db
         second: Option<String>,
     },
-    /// Register pre-existing worktrees
+    /// Register worktrees created outside ship
     Index {
+        /// Only this project (default: every project)
         project: Option<String>,
+        /// Index every candidate without asking; required without a terminal
         #[arg(long, short = 'a')]
         all: bool,
+        /// Show what would be indexed
         #[arg(long)]
         dry_run: bool,
     },
     /// Clean up workspaces whose PR is merged
     Gc {
+        /// Skip the picker: take every merged workspace (or every orphan with --databases/--sessions)
         #[arg(long, short = 'f')]
         force: bool,
+        /// Show what would be cleaned up
         #[arg(long)]
         dry_run: bool,
+        /// Run `ship sync` for each project afterwards
         #[arg(long, short = 's')]
         sync: bool,
         /// Sweep orphaned agent sessions instead of workspaces
@@ -113,6 +141,11 @@ enum Cmd {
     },
     /// Download and install the latest release
     Update,
+    /// Print the agent skill for ship, or install it
+    Skill {
+        #[command(subcommand)]
+        cmd: Option<SkillCmd>,
+    },
     /// Background update-cache refresh worker (best-effort, errors swallowed)
     #[command(name = "__refresh-update-cache", hide = true)]
     RefreshUpdateCache,
@@ -128,15 +161,15 @@ fn help_text() -> String {
 
   {project_setup}
     {init}                          Register current directory as a project
-    {init} --alias ep ...           Non-interactive with flags
-    {projects}                      List registered projects
-    {config_show} [alias] [--all]   Show stored config with file path + lines
+    {init} --alias ep ...           Override what init detects
+    {projects} [--json]             List registered projects
+    {config_show} [alias] [--all] [--json]   Show stored config with file path + lines
     {config_sessions} [on|off]   Delete agent sessions on teardown
 
   {lifecycle}
     {create} [project] [branch]     Create or resume a workspace
     {down}   [project] [branch] [--remote]   Tear down a workspace
-    {ls}     [project]              List active workspaces
+    {ls}     [project] [--json]     List active workspaces
 
   {dev_server}
     {up}     [--open]               Start dev server + proxy
@@ -164,6 +197,12 @@ fn help_text() -> String {
     {gc}     --databases            Clean up databases no workspace claims
     {gc}     --sessions             Clean up agent sessions with no worktree left
     {update}                        Download and install the latest release
+
+  {agents}
+    {skill}                         Print the agent skill for ship
+    {skill} install [--dir <path>]  Install it (default: ~/.agents/skills/ship/)
+    Without a terminal, prompts take their safe default or exit 1 naming the
+    flag to pass. Every failure exits nonzero.
 
   {options}
     --help, -h                    Show help for any command
@@ -210,6 +249,8 @@ fn help_text() -> String {
         index = blue("index"),
         gc = blue("gc"),
         update = blue("update"),
+        agents = bold("Agents"),
+        skill = blue("skill"),
         options = bold("Options"),
         examples = bold("Examples"),
         d = dim("$"),
@@ -221,10 +262,10 @@ fn help_text() -> String {
     )
 }
 
-fn dispatch(cmd: Cmd) {
+fn dispatch(cmd: Cmd) -> ExitCode {
     match cmd {
         Cmd::Init(args) => commands::init::run(args),
-        Cmd::Projects => commands::projects::run(),
+        Cmd::Projects { json } => commands::projects::run(json),
         Cmd::Config { cmd } => commands::config::run(cmd),
         Cmd::Create {
             project,
@@ -238,12 +279,19 @@ fn dispatch(cmd: Cmd) {
             db_only,
             remote,
         } => commands::down::run(project, branch, force, db_only, remote),
-        Cmd::Ls { project, no_pr } => commands::list::run(project, no_pr),
+        Cmd::Ls {
+            project,
+            no_pr,
+            json,
+        } => commands::list::run(project, no_pr, json),
         Cmd::Up { open } => commands::up::run(open),
         Cmd::Proxy { cmd } => commands::proxy::run(cmd),
         Cmd::Db { cmd } => match cmd {
             Some(DbCmd::Exec { sql }) => commands::db::run_exec(&sql),
-            None => commands::db::print_help(),
+            None => {
+                commands::db::print_help();
+                ExitCode::SUCCESS
+            }
         },
         Cmd::Sync { project } => commands::sync::run(project),
         Cmd::Reset => commands::reset::run(),
@@ -262,19 +310,25 @@ fn dispatch(cmd: Cmd) {
             remote,
         } => commands::gc::run(force, dry_run, sync, sessions, databases, remote),
         Cmd::Update => commands::update::run(),
+        Cmd::Skill { cmd } => commands::skill::run(cmd),
         Cmd::RefreshUpdateCache => {
             let _ = services::updater::refresh_cache();
+            ExitCode::SUCCESS
         }
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        None => println!("{}", help_text()),
+    let code = match cli.command {
+        None => {
+            println!("{}", help_text());
+            ExitCode::SUCCESS
+        }
         Some(cmd) => dispatch(cmd),
-    }
+    };
     // Post-run hooks (both no-op for dev builds and the refresh worker itself).
     services::updater::notify_if_available();
     services::updater::spawn_background_refresh_if_stale();
+    code
 }

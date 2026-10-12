@@ -1,7 +1,8 @@
 use crate::domain::removal::Removal;
 use crate::errors::Result;
-use crate::fmt::{blue, bold, dim, green, red, yellow};
+use crate::fmt::{blue, bold, dim, green, yellow};
 use crate::services::proxy;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship proxy <start|stop|status|ls|add|rm|trust|edit|next-port>
@@ -18,9 +19,17 @@ pub enum ProxyCmd {
     /// List all routes
     Ls,
     /// Add a route
-    Add { domain: String, port: u16 },
+    Add {
+        /// e.g. app.localhost
+        domain: String,
+        /// Local port the domain proxies to
+        port: u16,
+    },
     /// Remove a route
-    Rm { domain: String },
+    Rm {
+        /// Domain of the route to remove
+        domain: String,
+    },
     /// Trust CA in macOS keychain
     Trust,
     /// Open Caddyfile in $EDITOR
@@ -30,7 +39,7 @@ pub enum ProxyCmd {
     NextPort,
 }
 
-pub fn run(cmd: Option<ProxyCmd>) {
+pub fn run(cmd: Option<ProxyCmd>) -> ExitCode {
     let result = match cmd {
         None => {
             println!("Manage the local HTTPS reverse proxy.\n\nRun 'ship proxy --help' for available commands.");
@@ -44,45 +53,36 @@ pub fn run(cmd: Option<ProxyCmd>) {
         }
         Some(ProxyCmd::Status) => status(),
         Some(ProxyCmd::Ls) => ls(),
-        Some(ProxyCmd::Add { domain, port }) => {
-            match proxy::add_route(&domain, port) {
-                Ok(()) => println!(
-                    "  {} {} {} localhost:{}",
-                    green("✓"),
-                    bold(&domain),
-                    dim("→"),
-                    blue(port)
-                ),
-                Err(e) => println!("  {} {}", red("✗"), e),
-            }
-            Ok(())
-        }
+        Some(ProxyCmd::Add { domain, port }) => proxy::add_route(&domain, port).map(|()| {
+            println!(
+                "  {} {} {} localhost:{}",
+                green("✓"),
+                bold(&domain),
+                dim("→"),
+                blue(port)
+            )
+        }),
         Some(ProxyCmd::Rm { domain }) => {
-            match proxy::remove_route(&domain) {
-                Ok(Removal::Removed) => println!("  {} Removed {}", green("✓"), bold(&domain)),
-                Ok(Removal::AlreadyGone) => {
-                    println!("  {} No route for {}", dim("·"), bold(&domain))
-                }
-                Err(e) => println!("  {} {}", red("✗"), e),
-            }
-            Ok(())
+            proxy::remove_route(&domain).map(|removal| match removal {
+                Removal::Removed => println!("  {} Removed {}", green("✓"), bold(&domain)),
+                Removal::AlreadyGone => println!("  {} No route for {}", dim("·"), bold(&domain)),
+            })
         }
-        Some(ProxyCmd::Trust) => {
-            match proxy::trust() {
-                Ok(()) => println!(
-                    "  {} CA trusted. HTTPS will work in all browsers.",
-                    green("✓")
-                ),
-                Err(e) => println!("  {} {}", red("✗"), e),
-            }
-            Ok(())
-        }
+        Some(ProxyCmd::Trust) => proxy::trust().map(|()| {
+            println!(
+                "  {} CA trusted. HTTPS will work in all browsers.",
+                green("✓")
+            )
+        }),
         Some(ProxyCmd::Edit) => proxy::edit_caddyfile(),
         Some(ProxyCmd::NextPort) => proxy::next_port().map(|port| println!("{port}")),
     };
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

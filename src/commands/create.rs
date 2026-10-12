@@ -1,12 +1,13 @@
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, red, yellow};
-use crate::prompt;
+use crate::prompt::{self, Unattended};
 use crate::services::env::PatchResult;
 use crate::services::workspace::{provision, ProvisionInput, ProvisionStep, Status, StepEvent};
 use crate::services::{config, editor};
-use crate::ui::{Row, Table};
+use crate::ui::{self, Row, Table};
 use crate::util::resolve_path;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // Pure rendering — turns provision events (and env changes) into console lines.
@@ -15,8 +16,8 @@ use crate::util::resolve_path;
 struct RenderContext {
     branch: String,
     worktree_dir: String,
-    db_name: String,
-    source: String,
+    /// Workspace database and the source it clones; None without a database.
+    database: Option<(String, String)>,
     proxy_domain: String,
     port: u16,
 }
@@ -97,15 +98,18 @@ fn render_event(e: &StepEvent<ProvisionStep>, ctx: &RenderContext) -> Vec<String
             }
         }
         ProvisionStep::Database => {
+            let Some((db_name, source)) = &ctx.database else {
+                return vec![];
+            };
             if e.status == Status::SkippedExisting {
-                vec![skip_line("Database", &bold(&ctx.db_name))]
+                vec![skip_line("Database", &bold(db_name))]
             } else {
                 vec![ok_line(
                     "Database",
                     &format!(
                         "{} {}",
-                        bold(&ctx.db_name),
-                        dim(format!("(cloned from {})", ctx.source))
+                        bold(db_name),
+                        dim(format!("(cloned from {source})"))
                     ),
                 )]
             }
@@ -167,16 +171,16 @@ fn render_env_changes(results: &[PatchResult]) -> Vec<String> {
 // ship create [project] [branch] [--base <branch>]
 // ---------------------------------------------------------------------------
 
-pub fn run(project: Option<String>, branch: Option<String>, base: Option<String>) {
+pub fn run(project: Option<String>, branch: Option<String>, base: Option<String>) -> ExitCode {
     match run_inner(project, branch, base) {
-        Ok(()) => {}
         Err(e @ Error::DatabaseUnreachable { .. }) => {
-            println!();
-            println!("  {} {}", red("✗"), e);
-            println!("    Start it first, then run this command again.");
-            println!();
+            eprintln!();
+            eprintln!("  {} {}", red("✗"), e);
+            eprintln!("    Start it first, then run this command again.");
+            eprintln!();
+            ExitCode::FAILURE
         }
-        Err(e) => eprintln!("\n  {} {}\n", red("Error:"), e),
+        result => super::finish(result),
     }
 }
 
@@ -191,18 +195,19 @@ fn run_inner(
         None => {
             let ship_config = config::load_config()?;
             if ship_config.projects.is_empty() {
-                println!();
-                println!("  {} No projects registered.", red("✗"));
-                println!("  {}", dim("Register one with: ship init"));
-                println!();
-                return Ok(());
+                return Err(Error::NoProjects);
             }
             let rows = ship_config
                 .projects
                 .iter()
                 .map(|(alias, p)| Row::new(alias.clone(), [bold(alias), dim(&p.path)]))
                 .collect();
-            prompt::pick("Select a project", &["PROJECT", "PATH"], rows)?
+            prompt::pick(
+                "Select a project",
+                &["PROJECT", "PATH"],
+                rows,
+                "<project> <branch>",
+            )?
         }
     };
     let project_config = config::get_project(&project)?;
@@ -210,11 +215,16 @@ fn run_inner(
     // 2. Resolve branch.
     let branch = match branch_opt {
         Some(b) => b,
-        None => prompt::input("Branch name:", None)?,
+        None => prompt::input("Branch name:", None, "<branch>")?,
     };
 
     // Render context (derived names — single source of truth in domain).
-    let names = derive_names(&project_config.worktree, &project, &branch);
+    let names = derive_names(
+        &project_config.worktree,
+        project_config.database.as_ref(),
+        &project,
+        &branch,
+    );
     let worktree_dir = resolve_path(&project_config.path, &names.worktree_dir_relative);
 
     println!();
@@ -230,8 +240,10 @@ fn run_inner(
     let ctx = RenderContext {
         branch: branch.clone(),
         worktree_dir,
-        db_name: names.db_name.clone(),
-        source: project_config.database.source.clone(),
+        database: names
+            .db_name
+            .clone()
+            .zip(project_config.database.as_ref().map(|d| d.source.clone())),
         proxy_domain: names.proxy_domain.clone(),
         port: outcome.workspace.port,
     };
@@ -251,7 +263,7 @@ fn run_inner(
             w.port
         );
         println!();
-        if prompt::confirm("Open in editor?", true)? {
+        if prompt::confirm("Open in editor?", true, Unattended::Answer(false))? {
             editor::open(&w.path);
         }
         return Ok(());
@@ -267,13 +279,15 @@ fn run_inner(
         }
     }
 
-    // 4. Auto-open editor (prompt once; persist preference).
+    // 4. Auto-open editor (prompt once; persist preference). Unattended runs
+    // don't open it and don't store an answer nobody gave.
     println!();
     let mut ship_config = config::load_config()?;
     let should_open = match ship_config.auto_open_editor {
         Some(v) => v,
+        None if !ui::interactive() => false,
         None => {
-            let v = prompt::confirm("Open workspace in editor?", true)?;
+            let v = prompt::confirm("Open workspace in editor?", true, Unattended::Answer(false))?;
             ship_config.auto_open_editor = Some(v);
             config::save_config(&ship_config)?;
             v

@@ -1,15 +1,16 @@
 use crate::commands::teardown;
 use crate::domain::remote_branch::{self, RemoteBranchAction, RemoteBranchPolicy};
 use crate::domain::workspace_locate::locate_workspace;
-use crate::errors::Result;
+use crate::errors::{Error, Result};
 use crate::fmt::{bold, dim, green, red, yellow};
-use crate::prompt;
+use crate::prompt::{self, Unattended};
 use crate::schema::Workspace;
 use crate::services::config;
 use crate::services::github;
 use crate::services::workspace::{TeardownJob, TeardownOptions};
 use crate::ui::{Picker, Row, Table, Update};
 use crate::util::{cwd_string, plural};
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship down [project] [branch] [--force] [--db-only] [--remote]
@@ -29,10 +30,8 @@ pub fn run(
     force: bool,
     db_only: bool,
     remote: bool,
-) {
-    if let Err(e) = run_inner(project, branch, force, db_only, remote) {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
-    }
+) -> ExitCode {
+    super::finish_with(run_inner(project, branch, force, db_only, remote))
 }
 
 /// Column of the PR status, filled in by the background `gh` lookup.
@@ -74,7 +73,7 @@ fn pick_workspaces(candidates: &[&Workspace]) -> Result<Vec<Target>> {
         .stream(prs, |(i, found): (usize, github::WorkspacePr)| {
             Update::new(i, PR_COLUMN, github::pr_label(found.pr.as_ref()))
         })
-        .interact()?;
+        .interact("<project> <branch>")?;
 
     Ok(picked
         .into_iter()
@@ -88,7 +87,7 @@ fn run_inner(
     force: bool,
     db_only: bool,
     remote: bool,
-) -> Result<()> {
+) -> Result<ExitCode> {
     // Resolve targets. Explicit args and the cwd workspace stay single-target;
     // only the "nothing to go on" path opens the picker.
     let mut targets: Vec<Target> =
@@ -96,13 +95,9 @@ fn run_inner(
             match config::find_workspace(project, branch)? {
                 Some(w) => vec![Target::pending(w)],
                 None => {
-                    println!(
-                        "  {} No workspace found for {} / {}",
-                        red("✗"),
-                        bold(project),
-                        bold(branch)
-                    );
-                    return Ok(());
+                    return Err(Error::WorkspaceNotFound {
+                        branch: format!("{project}/{branch}"),
+                    })
                 }
             }
         } else {
@@ -117,23 +112,17 @@ fn run_inner(
                     None => workspaces.iter().collect(),
                 };
                 if candidates.is_empty() {
-                    println!(
-                        "  {} No workspaces found for project {}",
-                        red("✗"),
-                        bold(project_opt.as_deref().unwrap_or("?"))
-                    );
-                    return Ok(());
+                    return Err(Error::NoActiveWorkspaces);
                 }
                 pick_workspaces(&candidates)?
             } else {
-                println!("  {} No workspaces found.", red("✗"));
-                return Ok(());
+                return Err(Error::NoActiveWorkspaces);
             }
         };
 
     if targets.is_empty() {
         println!("  Cancelled.");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let remote_policy = if remote {
@@ -168,9 +157,9 @@ fn run_inner(
             1 => format!("Tear down workspace {}?", bold(&targets[0].ws.branch)),
             n => format!("Tear down {n} workspaces?"),
         };
-        if !prompt::confirm(&question, false)? {
+        if !prompt::confirm(&question, false, Unattended::Require("--force"))? {
             println!("  Cancelled.");
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
     }
 
@@ -197,13 +186,17 @@ fn run_inner(
     }
 
     println!();
+    let mut broke = false;
     match teardown::run_all(jobs) {
         // The tree already showed which step broke; say what it cost.
         Ok(kept) => failures.extend(
             kept.into_iter()
                 .map(|name| (name, "kept in the registry".to_string())),
         ),
-        Err(e) => println!("  {} {}", red("✗"), dim(e.to_string())),
+        Err(e) => {
+            broke = true;
+            println!("  {} {}", red("✗"), dim(e.to_string()))
+        }
     }
 
     println!();
@@ -225,5 +218,9 @@ fn run_inner(
         );
     }
     println!();
-    Ok(())
+    Ok(if failures.is_empty() && !broke {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }

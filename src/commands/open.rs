@@ -1,13 +1,14 @@
 use crate::commands::list;
 use crate::domain::workspace_locate::locate_workspace;
 use crate::errors::{Error, Result};
-use crate::fmt::{bold, red};
+use crate::fmt::bold;
 use crate::prompt;
 use crate::schema::Workspace;
 use crate::services::database::{self, DbTarget};
 use crate::services::{config, editor, shell};
 use crate::ui::Row;
 use crate::util::cwd_string;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship open [branch-or-target] [target]
@@ -54,13 +55,16 @@ fn resolve_workspace(
             Row::new(w, cells)
         })
         .collect();
-    prompt::pick("Select a workspace", &list::COLUMNS, rows)
+    prompt::pick(
+        "Select a workspace",
+        &list::COLUMNS,
+        rows,
+        "a branch: ship open <branch> [editor|url|db]",
+    )
 }
 
-pub fn run(first: Option<String>, second: Option<String>) {
-    if let Err(e) = run_inner(first, second) {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
-    }
+pub fn run(first: Option<String>, second: Option<String>) -> ExitCode {
+    super::finish(run_inner(first, second))
 }
 
 fn run_inner(first: Option<String>, second: Option<String>) -> Result<()> {
@@ -80,15 +84,18 @@ fn run_inner(first: Option<String>, second: Option<String>) -> Result<()> {
             shell::exec("open", &[&url])?;
         }
         "db" => {
-            println!("  Connecting to {}...", bold(&workspace.db_name));
-            database::session(DbTarget::from(&project_config.database), &workspace.db_name)?;
+            let (Some(db), Some(name)) = (&project_config.database, &workspace.db_name) else {
+                return Err(Error::NoDatabase {
+                    alias: workspace.project.clone(),
+                });
+            };
+            println!("  Connecting to {}...", bold(name));
+            database::session(DbTarget::from(db), name)?;
         }
         other => {
-            println!(
-                "  {} Unknown target '{}'. Use: editor, url, db",
-                red("✗"),
-                other
-            );
+            return Err(Error::UnknownTarget {
+                target: other.to_string(),
+            })
         }
     }
     Ok(())

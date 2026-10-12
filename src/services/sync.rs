@@ -5,7 +5,8 @@ use crate::services::git;
 use crate::services::shell::{self, NON_INTERACTIVE_ENV};
 
 // Fast-forwards the project's base checkout, then (only when HEAD moved) runs
-// the install scope and — when the database is reachable (ping) — the db scope.
+// the install scope and — when the database is reachable (ping), or the
+// project has none — the db scope.
 
 pub struct SyncResult {
     pub pulled: bool,
@@ -70,7 +71,13 @@ pub fn sync(pc: &ProjectConfig, base: Option<&str>) -> Result<SyncResult> {
             }
             installed = true;
         }
-        if !pc.commands.db.is_empty() && database::ping(DbTarget::from(&pc.database)) {
+        // Without a postgres database the db scope has nothing to wait for
+        // (sqlite migrations, codegen): it runs ungated.
+        let reachable = pc
+            .database
+            .as_ref()
+            .is_none_or(|d| database::ping(DbTarget::from(d)));
+        if !pc.commands.db.is_empty() && reachable {
             for cmd in &pc.commands.db {
                 shell::exec_in_dir(repo, cmd, NON_INTERACTIVE_ENV)?;
             }

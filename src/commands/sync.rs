@@ -1,15 +1,14 @@
 use crate::errors::Result;
-use crate::fmt::{bold, dim, green, red, yellow};
+use crate::fmt::{bold, dim, green, yellow};
 use crate::services::{config, sync};
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship sync <project>
 // ---------------------------------------------------------------------------
 
-pub fn run(project: String) {
-    if let Err(e) = run_inner(&project) {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
-    }
+pub fn run(project: String) -> ExitCode {
+    super::finish(run_inner(&project))
 }
 
 fn run_inner(project: &str) -> Result<()> {
@@ -42,11 +41,11 @@ fn run_inner(project: &str) -> Result<()> {
         println!("  {} Dependencies   installed", green("✓"));
     }
     if result.migrated {
-        println!(
-            "  {} Migrations     applied {}",
-            green("✓"),
-            dim(format!("({})", project_config.database.source))
-        );
+        let source = match &project_config.database {
+            Some(db) => dim(format!("({})", db.source)),
+            None => String::new(),
+        };
+        println!("  {} Migrations     applied {}", green("✓"), source);
     }
 
     println!();

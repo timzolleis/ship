@@ -3,15 +3,39 @@ use crate::fmt::{blue, bold, dim};
 use crate::services::config;
 use crate::ui::{Live, Row};
 use crate::util::plural;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship projects — list registered projects
 // ---------------------------------------------------------------------------
 
-pub fn run() {
-    if let Err(e) = run_inner() {
-        eprintln!("Error: {e}");
+pub fn run(json: bool) -> ExitCode {
+    let result = if json { print_json() } else { run_inner() };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::FAILURE
+        }
     }
+}
+
+/// One summary per project; `ship config show --json` has the full config.
+fn print_json() -> Result<()> {
+    let rows: Vec<serde_json::Value> = config::load_config()?
+        .projects
+        .iter()
+        .map(|(alias, p)| {
+            serde_json::json!({
+                "alias": alias,
+                "path": p.path,
+                "domain": p.domain,
+                "port": p.port,
+                "database": p.database.is_some(),
+            })
+        })
+        .collect();
+    super::print_json(&rows)
 }
 
 fn run_inner() -> Result<()> {
@@ -33,7 +57,13 @@ fn run_inner() -> Result<()> {
             [
                 bold(alias),
                 blue(&project.path),
-                project.database.docker_container().to_string(),
+                match &project.database {
+                    Some(db) if !db.docker_container().is_empty() => {
+                        db.docker_container().to_string()
+                    }
+                    Some(_) => dim("local"),
+                    None => dim("—"),
+                },
             ],
         )
     }));

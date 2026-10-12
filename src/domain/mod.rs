@@ -1,5 +1,6 @@
 pub mod caddyfile;
 pub mod db_orphans;
+pub mod detect;
 pub mod env_patch;
 pub mod remote_branch;
 pub mod removal;

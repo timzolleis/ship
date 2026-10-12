@@ -1,4 +1,4 @@
-use crate::schema::WorktreeConfig;
+use crate::schema::{DatabaseConfig, WorktreeConfig};
 
 // Single source of truth for slugging + pattern resolution. Semantics ported
 // verbatim from the TS domain module:
@@ -8,7 +8,8 @@ use crate::schema::WorktreeConfig;
 
 pub struct WorkspaceNames {
     pub worktree_dir_relative: String,
-    pub db_name: String,
+    /// Absent when the project has no database.
+    pub db_name: Option<String>,
     pub proxy_domain: String,
 }
 
@@ -67,7 +68,12 @@ pub fn pattern_matches(pattern: &str, candidate: &str) -> bool {
 
 /// Derive all workspace names. `worktree_dir_relative` is relative — the
 /// caller resolves it against the project's repo path.
-pub fn derive_names(wt: &WorktreeConfig, project: &str, branch: &str) -> WorkspaceNames {
+pub fn derive_names(
+    wt: &WorktreeConfig,
+    database: Option<&DatabaseConfig>,
+    project: &str,
+    branch: &str,
+) -> WorkspaceNames {
     let branch_slug = to_branch_slug(branch);
     let branch_slug_safe = to_branch_slug_safe(branch);
     let vars: &[(&str, &str)] = &[
@@ -77,14 +83,43 @@ pub fn derive_names(wt: &WorktreeConfig, project: &str, branch: &str) -> Workspa
     ];
     WorkspaceNames {
         worktree_dir_relative: resolve_pattern(&wt.dir_pattern, vars),
-        db_name: resolve_pattern(&wt.db_name_pattern, vars),
+        db_name: database.map(|db| resolve_pattern(&db.name_pattern, vars)),
         proxy_domain: resolve_pattern(&wt.proxy_domain_pattern, vars),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::pattern_matches;
+    use super::*;
+    use crate::schema::ExecutionRuntime;
+
+    fn worktree() -> WorktreeConfig {
+        WorktreeConfig {
+            dir_pattern: "../app-{branch_slug}/".to_string(),
+            proxy_domain_pattern: "{branch_slug}.app.localhost".to_string(),
+        }
+    }
+
+    #[test]
+    fn names_without_a_database_have_no_db_name() {
+        let names = derive_names(&worktree(), None, "app", "tim/feat");
+        assert_eq!(names.db_name, None);
+        assert_eq!(names.proxy_domain, "tim-feat.app.localhost");
+    }
+
+    #[test]
+    fn names_with_a_database_resolve_its_pattern() {
+        let db = DatabaseConfig {
+            runtime: ExecutionRuntime::Local,
+            user: "postgres".to_string(),
+            source: "app".to_string(),
+            host: "localhost".to_string(),
+            port: 5432,
+            name_pattern: "{project}_{branch_slug_safe}".to_string(),
+        };
+        let names = derive_names(&worktree(), Some(&db), "app", "tim/feat");
+        assert_eq!(names.db_name.as_deref(), Some("app_tim_feat"));
+    }
 
     #[test]
     fn matches_only_its_own_shape() {

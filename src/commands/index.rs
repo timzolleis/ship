@@ -1,21 +1,20 @@
 use crate::domain::workspace_name::derive_names;
-use crate::errors::Result;
-use crate::fmt::{blue, bold, dim, green, red, yellow};
-use crate::prompt;
+use crate::errors::{Error, Result};
+use crate::fmt::{blue, bold, dim, green, yellow};
+use crate::prompt::{self, Unattended};
 use crate::schema::Workspace;
 use crate::services::database::{self, DbTarget};
 use crate::services::{config, git, proxy};
 use crate::util::plural;
 use std::collections::HashSet;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship index [project] [--all] [--dry-run] — register pre-existing worktrees
 // ---------------------------------------------------------------------------
 
-pub fn run(project: Option<String>, all: bool, dry_run: bool) {
-    if let Err(e) = run_inner(project, all, dry_run) {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
-    }
+pub fn run(project: Option<String>, all: bool, dry_run: bool) -> ExitCode {
+    super::finish(run_inner(project, all, dry_run))
 }
 
 fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()> {
@@ -28,16 +27,10 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
         .collect();
 
     if project_entries.is_empty() {
-        println!();
-        match &project_opt {
-            Some(p) => println!("  {} {}", red("Project not found:"), p),
-            None => println!(
-                "  {}",
-                dim("No projects registered. Run 'ship init' first.")
-            ),
-        }
-        println!();
-        return Ok(());
+        return Err(match project_opt {
+            Some(alias) => Error::ProjectNotFound { alias },
+            None => Error::NoProjects,
+        });
     }
 
     let existing_workspaces = config::load_workspaces()?;
@@ -82,9 +75,10 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
 
         total_candidates += candidates.len();
 
-        let target = DbTarget::from(&project_config.database);
-        let container_running = database::ping(target);
-        if !container_running {
+        // None: the project has no database, so there is nothing to verify.
+        let target = project_config.database.as_ref().map(DbTarget::from);
+        let reachable = target.map(database::ping);
+        if reachable == Some(false) {
             println!(
                 "  {} Database not reachable — DB existence not verified.",
                 yellow("⚠")
@@ -92,9 +86,25 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
         }
 
         for wt in candidates {
-            let names = derive_names(&project_config.worktree, alias, &wt.branch);
+            let names = derive_names(
+                &project_config.worktree,
+                project_config.database.as_ref(),
+                alias,
+                &wt.branch,
+            );
 
-            let db_found = container_running && database::exists(target, &names.db_name);
+            let db_line = match (&names.db_name, target, reachable) {
+                (Some(name), Some(t), Some(true)) => format!(
+                    "{name} {}",
+                    if database::exists(t, name) {
+                        green("(found)")
+                    } else {
+                        dim("(not found)")
+                    }
+                ),
+                (Some(name), ..) => format!("{name} {}", dim("(unknown)")),
+                (None, ..) => dim("(no database)"),
+            };
 
             let route = existing_routes
                 .iter()
@@ -113,19 +123,7 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
 
             println!();
             println!("  {} {}  {}", blue("•"), bold(&wt.branch), dim(&wt.path));
-            println!(
-                "      DB     {} {}",
-                names.db_name,
-                if container_running {
-                    if db_found {
-                        green("(found)")
-                    } else {
-                        dim("(not found)")
-                    }
-                } else {
-                    dim("(unknown)")
-                }
-            );
+            println!("      DB     {db_line}");
             println!(
                 "      Proxy  https://{} → :{} {}",
                 names.proxy_domain,
@@ -143,8 +141,12 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
                 continue;
             }
 
-            let should_index =
-                all || prompt::confirm(&format!("Index {}/{}?", alias, wt.branch), true)?;
+            let should_index = all
+                || prompt::confirm(
+                    &format!("Index {}/{}?", alias, wt.branch),
+                    true,
+                    Unattended::Require("--all"),
+                )?;
 
             if !should_index {
                 println!("      {}", dim("skipped"));

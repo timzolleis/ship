@@ -1,18 +1,23 @@
 use crate::errors::{Error, Result};
-use crate::fmt::{blue, bold, dim, green, red, yellow};
+use crate::fmt::{blue, bold, dim, green, yellow};
 use crate::schema::{EnvVarType, ProjectConfig};
 use crate::services::config;
 use crate::ui::{Live, Row, Table};
 use crate::util::cwd_string;
+use std::process::ExitCode;
 
 #[derive(clap::Subcommand)]
 pub enum ConfigCmd {
     /// Show a project's config with the file path and line numbers
     Show {
+        /// Project to show (default: the project containing the current directory)
         alias: Option<String>,
         /// Show every registered project
         #[arg(long, short = 'a')]
         all: bool,
+        /// Print the stored config as JSON; without an alias outside a project, every project. Fails when config.json does not parse
+        #[arg(long)]
+        json: bool,
     },
     /// Delete agent transcripts when a workspace is torn down
     Sessions {
@@ -101,15 +106,17 @@ impl LineMap {
 // ship config show
 // ---------------------------------------------------------------------------
 
-pub fn run(cmd: Option<ConfigCmd>) {
-    let result = match cmd {
-        Some(ConfigCmd::Show { alias, all }) => show(alias, all),
+pub fn run(cmd: Option<ConfigCmd>) -> ExitCode {
+    super::finish(match cmd {
+        Some(ConfigCmd::Show {
+            alias,
+            all,
+            json: true,
+        }) => show_json(alias, all),
+        Some(ConfigCmd::Show { alias, all, .. }) => show(alias, all),
         Some(ConfigCmd::Sessions { state }) => sessions(state),
         None => show(None, false),
-    };
-    if let Err(e) = result {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
-    }
+    })
 }
 
 /// Read or write the agent-session toggle. Reading prints where the setting
@@ -134,6 +141,36 @@ fn sessions(state: Option<Toggle>) -> Result<()> {
     }
     println!();
     Ok(())
+}
+
+fn project_at(projects: &indexmap::IndexMap<String, ProjectConfig>, cwd: &str) -> Option<String> {
+    projects
+        .iter()
+        .find(|(_, p)| cwd == p.path || cwd.starts_with(&format!("{}/", p.path)))
+        .map(|(a, _)| a.clone())
+}
+
+/// `{ configPath, projects: { alias: ProjectConfig } }` in the stored shape.
+/// Loading is the validation: a config.json that does not decode fails here.
+fn show_json(alias: Option<String>, all: bool) -> Result<()> {
+    let mut projects = config::load_config()?.projects;
+    let selected = match (alias, all) {
+        (_, true) => None,
+        (Some(alias), false) => Some(alias),
+        (None, false) => project_at(&projects, &cwd_string()),
+    };
+    if let Some(alias) = selected {
+        let project = projects
+            .shift_remove(&alias)
+            .ok_or(Error::ProjectNotFound {
+                alias: alias.clone(),
+            })?;
+        projects = indexmap::IndexMap::from([(alias, project)]);
+    }
+    super::print_json(&serde_json::json!({
+        "configPath": config::config_path(),
+        "projects": projects,
+    }))
 }
 
 fn show(alias: Option<String>, all: bool) -> Result<()> {
@@ -170,14 +207,7 @@ fn show(alias: Option<String>, all: bool) -> Result<()> {
         if all {
             ship_config.projects.into_iter().collect()
         } else {
-            let resolved = match alias {
-                Some(a) => Some(a),
-                None => ship_config
-                    .projects
-                    .iter()
-                    .find(|(_, p)| cwd == p.path || cwd.starts_with(&format!("{}/", p.path)))
-                    .map(|(a, _)| a.clone()),
-            };
+            let resolved = alias.or_else(|| project_at(&ship_config.projects, &cwd));
             let Some(alias) = resolved else {
                 let aliases: Vec<&str> = ship_config.projects.keys().map(|a| a.as_str()).collect();
                 println!();

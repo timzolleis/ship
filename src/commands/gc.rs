@@ -2,9 +2,9 @@ use crate::commands::teardown as teardown_ui;
 use crate::domain::db_orphans::{self, OrphanQuery};
 use crate::domain::remote_branch::{self, RemoteBranchPolicy};
 use crate::domain::workspace_name::resolve_pattern;
-use crate::errors::Result;
+use crate::errors::{Error, Result};
 use crate::fmt::{bold, dim, green, red, yellow};
-use crate::prompt;
+use crate::prompt::{self, Unattended};
 use crate::schema::{ProjectConfig, Workspace};
 use crate::services::agent::{self, SessionDir, WorktreePrefix};
 use crate::services::database::{self, DbTarget};
@@ -14,6 +14,7 @@ use crate::services::{config, sync};
 use crate::ui::{Picker, Row, Table, Update};
 use crate::util::{plural, resolve_path};
 use indexmap::IndexMap;
+use std::process::ExitCode;
 use std::sync::mpsc;
 
 // ---------------------------------------------------------------------------
@@ -65,16 +66,24 @@ pub fn run(
     sessions_only: bool,
     databases: bool,
     remote: bool,
-) {
-    let result = if sessions_only {
-        sweep_sessions(force, dry_run).inspect(|()| println!())
+) -> ExitCode {
+    super::finish_with(if sessions_only {
+        sweep_sessions(force, dry_run).inspect(|_| println!())
     } else if databases {
-        sweep_orphans(force, dry_run).inspect(|()| println!())
+        sweep_orphans(force, dry_run).inspect(|_| println!())
     } else {
         run_inner(force, dry_run, should_sync, remote)
-    };
-    if let Err(e) = result {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
+    })
+}
+
+/// What answers a gc picker or confirm when nobody can.
+const UNATTENDED_HINT: &str = "--force or --dry-run";
+
+fn exit_code(all_ok: bool) -> ExitCode {
+    if all_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -95,7 +104,7 @@ fn session_row(s: &SessionDir) -> Row<SessionDir> {
     Row::new(s.clone(), [dim(s.harness), bold(&s.name)])
 }
 
-fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
+fn sweep_sessions(force: bool, dry_run: bool) -> Result<ExitCode> {
     let projects = config::load_config()?.projects;
     let prefixes: Vec<WorktreePrefix> = projects
         .iter()
@@ -106,7 +115,7 @@ fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
     println!();
     if orphans.is_empty() {
         println!("  {}", dim("No orphaned agent sessions."));
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let count = orphans.len();
@@ -128,7 +137,7 @@ fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
         for r in &rows {
             println!("  {} {}", table.line(r, ""), yellow("→ would delete"));
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let picked: Vec<SessionDir> = if force {
@@ -137,20 +146,26 @@ fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
         Picker::new("Select sessions to delete", rows)
             .multi()
             .header(&["HARNESS", "SESSION"])
-            .interact()?
+            .interact(UNATTENDED_HINT)?
             .into_iter()
             .map(|r| r.value)
             .collect()
     };
     if picked.is_empty() {
         println!("  Cancelled.");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let n = picked.len();
-    if !force && !prompt::confirm(&format!("Delete {} session{}?", n, plural(n)), false)? {
+    if !force
+        && !prompt::confirm(
+            &format!("Delete {} session{}?", n, plural(n)),
+            false,
+            Unattended::Require(UNATTENDED_HINT),
+        )?
+    {
         println!("  Cancelled.");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let mut deleted = 0;
@@ -175,7 +190,7 @@ fn sweep_sessions(force: bool, dry_run: bool) -> Result<()> {
         n,
         plural(n)
     );
-    Ok(())
+    Ok(exit_code(deleted == n))
 }
 
 // ---------------------------------------------------------------------------
@@ -199,17 +214,21 @@ struct Scan {
 }
 
 /// Every project's database server, scanned once. A server that is down is
-/// skipped — a stopped container is not evidence of an orphan.
+/// skipped — a stopped container is not evidence of an orphan. Projects
+/// without a database have nothing to scan.
 fn collect_orphans(projects: &IndexMap<String, ProjectConfig>) -> Result<Scan> {
     let claimed: Vec<String> = config::load_workspaces()?
         .into_iter()
-        .map(|w| w.db_name)
+        .filter_map(|w| w.db_name)
         .collect();
 
     let mut found = Vec::new();
     let mut skipped = Vec::new();
     for (alias, pc) in projects {
-        let target = DbTarget::from(&pc.database);
+        let Some(db) = &pc.database else {
+            continue;
+        };
+        let target = DbTarget::from(db);
         if !database::ping(target) {
             skipped.push(format!(
                 "{} {}",
@@ -225,10 +244,10 @@ fn collect_orphans(projects: &IndexMap<String, ProjectConfig>) -> Result<Scan> {
                 continue;
             }
         };
-        let pattern = resolve_pattern(&pc.worktree.db_name_pattern, &[("project", alias)]);
+        let pattern = resolve_pattern(&db.name_pattern, &[("project", alias)]);
         let query = OrphanQuery {
             db_name_pattern: &pattern,
-            source: &pc.database.source,
+            source: &db.source,
             claimed: &claimed,
         };
         found.extend(
@@ -254,6 +273,9 @@ fn size_stream(
 ) -> mpsc::Receiver<(usize, String)> {
     let (tx, rx) = mpsc::channel();
     for (alias, pc) in projects {
+        let Some(db) = &pc.database else {
+            continue;
+        };
         let rows: Vec<usize> = orphans
             .iter()
             .enumerate()
@@ -264,7 +286,7 @@ fn size_stream(
             continue;
         }
         let dbs = rows.iter().map(|i| orphans[*i].db.clone()).collect();
-        let inner = database::size_stream(DbTarget::from(&pc.database), dbs);
+        let inner = database::size_stream(DbTarget::from(db), dbs);
         let tx = tx.clone();
         std::thread::spawn(move || {
             for (local, size) in inner {
@@ -298,7 +320,7 @@ fn pick_orphans(
         .stream(sizes, |(i, size): (usize, String)| {
             Update::new(i, SIZE_COLUMN, dim(size))
         })
-        .interact()?;
+        .interact(UNATTENDED_HINT)?;
 
     Ok(picked.into_iter().map(|r| r.value).collect())
 }
@@ -306,7 +328,7 @@ fn pick_orphans(
 /// Databases left behind by a teardown that never finished, or by a workspace
 /// removed outside ship. Its own mode because it pings every project's server,
 /// which is too slow to pay for on every `ship gc`.
-fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
+fn sweep_orphans(force: bool, dry_run: bool) -> Result<ExitCode> {
     let projects = config::load_config()?.projects;
     let Scan { orphans, skipped } = collect_orphans(&projects)?;
 
@@ -319,7 +341,7 @@ fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
             println!();
         }
         println!("  {}", dim("No orphaned databases."));
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
     if !skipped.is_empty() {
         println!();
@@ -340,7 +362,7 @@ fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
         for r in &rows {
             println!("  {} {}", table.line(r, ""), yellow("→ would drop"));
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let picked = if force {
@@ -350,20 +372,30 @@ fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
     };
     if picked.is_empty() {
         println!("  Cancelled.");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let n = picked.len();
-    if !force && !prompt::confirm(&format!("Drop {} database{}?", n, plural(n)), false)? {
+    if !force
+        && !prompt::confirm(
+            &format!("Drop {} database{}?", n, plural(n)),
+            false,
+            Unattended::Require(UNATTENDED_HINT),
+        )?
+    {
         println!("  Cancelled.");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // One failure must not strand the rest.
     let mut dropped = 0;
     for o in &picked {
-        let result = config::get_project(&o.project)
-            .and_then(|pc| database::drop_db(DbTarget::from(&pc.database), &o.db));
+        let result = config::get_project(&o.project).and_then(|pc| match &pc.database {
+            Some(db) => database::drop_db(DbTarget::from(db), &o.db),
+            None => Err(Error::NoDatabase {
+                alias: o.project.clone(),
+            }),
+        });
         match result {
             Ok(()) => {
                 dropped += 1;
@@ -385,20 +417,20 @@ fn sweep_orphans(force: bool, dry_run: bool) -> Result<()> {
         n,
         plural(n)
     );
-    Ok(())
+    Ok(exit_code(dropped == n))
 }
 
-fn run_inner(force: bool, dry_run: bool, should_sync: bool, remote: bool) -> Result<()> {
+fn run_inner(force: bool, dry_run: bool, should_sync: bool, remote: bool) -> Result<ExitCode> {
     let workspaces = config::load_workspaces()?;
     if workspaces.is_empty() {
         println!();
         println!("  {}", dim("No active workspaces."));
         println!();
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
-    sweep_workspaces(workspaces, force, dry_run, should_sync, remote)?;
+    let code = sweep_workspaces(workspaces, force, dry_run, should_sync, remote)?;
     println!();
-    Ok(())
+    Ok(code)
 }
 
 /// Merged rows come up checked, everything else unchecked but still listed —
@@ -408,7 +440,7 @@ fn pick_workspaces(checked: &[Checked]) -> Result<Vec<Checked>> {
     let picked = Picker::new("Select workspaces to tear down", rows)
         .multi()
         .header(&["PROJECT", "BRANCH", "PR"])
-        .interact()?;
+        .interact(UNATTENDED_HINT)?;
     Ok(picked.into_iter().map(|r| r.value).collect())
 }
 
@@ -418,7 +450,7 @@ fn sweep_workspaces(
     dry_run: bool,
     should_sync: bool,
     remote: bool,
-) -> Result<()> {
+) -> Result<ExitCode> {
     workspaces.sort_by(Workspace::listing_order);
     println!();
     println!(
@@ -478,14 +510,14 @@ fn sweep_workspaces(
                 plural(merged.len())
             );
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let to_clean = if force {
         if merged.is_empty() {
             println!();
             println!("  {}", dim("Nothing to clean up."));
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         merged
     } else {
@@ -495,7 +527,7 @@ fn sweep_workspaces(
     if to_clean.is_empty() {
         println!();
         println!("  {}", dim("Nothing to clean up."));
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // One unreadable project must not strand the rest — report it and carry on.
@@ -514,13 +546,17 @@ fn sweep_workspaces(
     }
 
     println!();
+    let mut broke = false;
     match teardown_ui::run_all(jobs) {
         // The tree already showed which step broke; say what it cost.
         Ok(kept) => failures.extend(
             kept.into_iter()
                 .map(|name| (name, "kept in the registry".to_string())),
         ),
-        Err(e) => println!("  {} {}", red("✗"), dim(e.to_string())),
+        Err(e) => {
+            broke = true;
+            println!("  {} {}", red("✗"), dim(e.to_string()))
+        }
     }
 
     let cleaned = total - failures.len();
@@ -552,7 +588,10 @@ fn sweep_workspaces(
             let project_config = config::get_project(&project)?;
             println!("  Syncing {}...", bold(&project));
             match sync::sync(&project_config, None) {
-                Err(e) => println!("  {} Sync failed    {}", yellow("⚠"), dim(e.to_string())),
+                Err(e) => {
+                    broke = true;
+                    println!("  {} Sync failed    {}", yellow("⚠"), dim(e.to_string()))
+                }
                 Ok(result) => {
                     if result.head_moved {
                         println!(
@@ -561,10 +600,11 @@ fn sweep_workspaces(
                             dim("main fast-forwarded")
                         );
                         if result.migrated {
+                            let source = project_config.database.as_ref().map(|d| &d.source);
                             println!(
                                 "  {} Base migrated  {}",
                                 green("✓"),
-                                dim(&project_config.database.source)
+                                dim(source.map_or("", |s| s.as_str()))
                             );
                         }
                     } else if let Some(skipped) = &result.skipped_pull {
@@ -577,5 +617,5 @@ fn sweep_workspaces(
         }
     }
 
-    Ok(())
+    Ok(exit_code(failures.is_empty() && !broke))
 }

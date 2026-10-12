@@ -1,237 +1,62 @@
+use crate::domain::detect::{DatabaseFound, Field, LeftEmpty};
 use crate::errors::{Error, Result};
-use crate::fmt::{blue, bold, dim, green};
-use crate::prompt;
+use crate::fmt::{blue, bold, dim, green, yellow};
+use crate::prompt::{self, Unattended};
 use crate::schema::{
     CommandsConfig, DatabaseConfig, EnvConfig, EnvFileVars, EnvVarConfig, EnvVarType,
     ExecutionRuntime, ProjectConfig, ShipConfig, WorktreeConfig,
 };
-use crate::services::{config, copy, git, proxy};
-use crate::ui::{Row, Table};
+use crate::services::detect::{self, EnvValues};
+use crate::services::{config, copy, proxy};
+use crate::ui::{self, Row, Table};
 use crate::util::cwd_string;
 use indexmap::IndexMap;
-use regex::Regex;
-use std::fs;
-use std::io::IsTerminal;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::process::ExitCode;
 
 #[derive(clap::Args)]
 pub struct InitArgs {
+    /// Short project name used in commands, domains, and database names (default: first 3 letters of the directory)
     #[arg(long)]
     alias: Option<String>,
+    /// Repo root to register (default: the current directory)
     #[arg(long)]
     path: Option<String>,
+    /// Docker container running postgres (default: the container publishing DATABASE_URL's port)
     #[arg(long)]
     db_container: Option<String>,
+    /// Postgres user (default: from DATABASE_URL)
     #[arg(long)]
     db_user: Option<String>,
+    /// Database each workspace clones from (default: from DATABASE_URL)
     #[arg(long)]
     db_source: Option<String>,
+    /// Install command; repeat for a sequence (default: detected from the lockfile)
     #[arg(long)]
     install_cmd: Vec<String>,
+    /// Database setup command, e.g. migrations; repeat for a sequence (default: detected prisma/drizzle)
     #[arg(long)]
     db_cmd: Vec<String>,
+    /// Dev server command; repeat for a sequence. ship sets PORT, and {port} is substituted (default: the package.json dev script)
     #[arg(long)]
     dev_cmd: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
-// .env auto-detection
-// ---------------------------------------------------------------------------
-
-const EXCLUDED_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    "dist",
-    "build",
-    ".next",
-    ".cache",
-    ".turbo",
-];
-
-// Local state a git checkout can't carry. Deliberately narrow: uploads/ and
-// storage/ are plausible but easily multi-GB, and a silent huge copy on every
-// `ship create` is worse than adding the path by hand once.
-const STATE_EXTENSIONS: &[&str] = &["db", "sqlite", "sqlite3", "pem", "key", "crt"];
-
-static ENV_LINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([A-Z_]+)=(.+)$").unwrap());
-static DATABASE_URL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"postgres(?:ql)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)").unwrap());
-
-struct DetectedEnv {
-    file: String,
-    vars: Vec<(String, String, EnvVarType)>,
-}
-
-fn find_env_files(dir: &Path, root: &Path, results: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if EXCLUDED_DIRS.contains(&name.as_str()) {
-            continue;
-        }
-        let full = entry.path();
-        let Ok(meta) = fs::metadata(&full) else {
-            continue;
-        };
-        if meta.is_dir() {
-            find_env_files(&full, root, results);
-        } else if name == ".env" {
-            if let Ok(rel) = full.strip_prefix(root) {
-                results.push(rel.display().to_string());
-            }
-        }
-    }
-}
-
-fn strip_quotes(v: &str) -> &str {
-    let v = v
-        .strip_prefix('"')
-        .or_else(|| v.strip_prefix('\''))
-        .unwrap_or(v);
-    v.strip_suffix('"')
-        .or_else(|| v.strip_suffix('\''))
-        .unwrap_or(v)
-}
-
-fn detect_env_files(cwd: &Path) -> Vec<DetectedEnv> {
-    let mut files = Vec::new();
-    find_env_files(cwd, cwd, &mut files);
-
-    let mut results = Vec::new();
-    for candidate in files {
-        let Ok(content) = fs::read_to_string(cwd.join(&candidate)) else {
-            continue;
-        };
-        let mut vars = Vec::new();
-        for line in content.split('\n') {
-            let Some(caps) = ENV_LINE_RE.captures(line) else {
-                continue;
-            };
-            let key = caps[1].to_string();
-            let value = strip_quotes(&caps[2]).to_string();
-
-            if key == "DATABASE_URL" || key.ends_with("_DATABASE_URL") {
-                vars.push((key, value, EnvVarType::DatabaseUrl));
-            } else if key.ends_with("_URL") && value.contains(".localhost") {
-                vars.push((key, value, EnvVarType::ProxyUrl));
-            } else if key.ends_with("_CALLBACK_URL") && value.starts_with("http://localhost") {
-                vars.push((key, value, EnvVarType::DevUrl));
-            }
-        }
-        if !vars.is_empty() {
-            results.push(DetectedEnv {
-                file: candidate,
-                vars,
-            });
-        }
-    }
-    results
-}
-
-struct ParsedDbUrl {
-    user: String,
-    host: String,
-    port: u16,
-    database: String,
-}
-
-fn parse_database_url(url: &str) -> Option<ParsedDbUrl> {
-    let caps = DATABASE_URL_RE.captures(url)?;
-    Some(ParsedDbUrl {
-        user: caps[1].to_string(),
-        host: caps[3].to_string(),
-        port: caps[4].parse().ok()?,
-        database: caps[5].to_string(),
-    })
-}
-
-fn resolve(opt: Option<String>, msg: &str, default: &str) -> Result<String> {
+fn resolve(opt: Option<String>, msg: &str, default: &str, hint: &str) -> Result<String> {
     match opt {
         Some(v) => Ok(v),
-        None => prompt::input(msg, Some(default)),
+        None => prompt::input(msg, Some(default), hint),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Copy-path detection
+// Copy paths
 // ---------------------------------------------------------------------------
-
-fn find_state_files(dir: &Path, root: &Path, results: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if EXCLUDED_DIRS.contains(&name.as_str()) {
-            continue;
-        }
-        let full = entry.path();
-        let Ok(meta) = fs::metadata(&full) else {
-            continue;
-        };
-        if meta.is_dir() {
-            find_state_files(&full, root, results);
-        } else if full
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| STATE_EXTENSIONS.contains(&e))
-        {
-            if let Ok(rel) = full.strip_prefix(root) {
-                results.push(rel.display().to_string());
-            }
-        }
-    }
-}
-
-/// Gitignored local state worth copying into a worktree. Tracked files already
-/// arrive with the checkout, so "git ignores it" is the whole signal.
-///
-/// A match is proposed as its containing directory when that directory is
-/// itself ignored — copying `database.db` without its `-wal`/`-shm` siblings
-/// can hand the app a torn read.
-fn detect_copy_paths(root: &Path) -> Vec<String> {
-    let mut files = Vec::new();
-    find_state_files(root, root, &mut files);
-    if files.is_empty() {
-        return Vec::new();
-    }
-
-    let repo = root.display().to_string();
-    let parents: Vec<String> = files
-        .iter()
-        .filter_map(|f| Path::new(f).parent())
-        .map(|p| p.display().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-    let ignored_dirs = git::ignored_paths(&repo, &parents);
-
-    let mut candidates: Vec<String> = Vec::new();
-    for file in &files {
-        let parent = Path::new(file)
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let candidate = if !parent.is_empty() && ignored_dirs.contains(&parent) {
-            parent
-        } else {
-            file.clone()
-        };
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
-        }
-    }
-
-    let ignored = git::ignored_paths(&repo, &candidates);
-    candidates.retain(|c| ignored.contains(c));
-    candidates
-}
 
 // Checkbox list. Everything detected starts checked on a first init; once the
 // project has a stored list, only stored paths start checked — so a path you
-// deselected stays deselected instead of silently coming back.
+// deselected stays deselected instead of silently coming back. Unattended
+// runs keep what starts checked.
 fn review_copy_paths(root: &str, detected: Vec<String>, stored: &[String]) -> Result<Vec<String>> {
     let mut paths = stored.to_vec();
     for d in detected {
@@ -259,31 +84,18 @@ fn review_copy_paths(root: &str, detected: Vec<String>, stored: &[String]) -> Re
         .collect();
 
     println!();
-    if !std::io::stdin().is_terminal() {
-        for (label, checked) in &items {
-            if *checked {
-                println!("    {} {}", green("✓"), dim(label));
-            }
-        }
-        return Ok(paths
-            .into_iter()
-            .zip(items)
-            .filter(|(_, (_, checked))| *checked)
-            .map(|(p, _)| p)
-            .collect());
-    }
-
     let picked = prompt::multi_select("Copy into new workspaces? (space toggles)", &items)?;
+    if !ui::interactive() {
+        for i in &picked {
+            println!("    {} {}", green("✓"), dim(&items[*i].0));
+        }
+    }
     Ok(picked.into_iter().map(|i| paths[i].clone()).collect())
 }
 
 // ---------------------------------------------------------------------------
 // Env review
 // ---------------------------------------------------------------------------
-
-/// Current on-disk values, file → var → value. Display only; a configured var
-/// whose file no longer holds it simply has no entry.
-type EnvValues = IndexMap<String, IndexMap<String, String>>;
 
 fn truncate(value: &str, max: usize) -> String {
     let short: String = value.chars().take(max).collect();
@@ -298,17 +110,27 @@ fn print_env_table(files: &IndexMap<String, EnvFileVars>, values: &EnvValues) {
     let groups: Vec<(&String, Vec<Row<()>>)> = files
         .iter()
         .map(|(file, vars)| {
-            let rows = vars
-                .iter()
-                .map(|(key, cfg)| {
-                    let value = values
-                        .get(file)
-                        .and_then(|v| v.get(key))
-                        .map(|v| truncate(v, 44))
-                        .unwrap_or_else(|| "(not present)".to_string());
-                    Row::new((), [key.clone(), dim(value), green(cfg.var_type.label())])
-                })
-                .collect();
+            let rows = if vars.is_empty() {
+                vec![Row::new(
+                    (),
+                    [
+                        "—".to_string(),
+                        String::new(),
+                        dim("copied, nothing rewritten"),
+                    ],
+                )]
+            } else {
+                vars.iter()
+                    .map(|(key, cfg)| {
+                        let value = values
+                            .get(file)
+                            .and_then(|v| v.get(key))
+                            .map(|v| truncate(v, 44))
+                            .unwrap_or_else(|| "(not present)".to_string());
+                        Row::new((), [key.clone(), dim(value), green(cfg.var_type.label())])
+                    })
+                    .collect()
+            };
             (file, rows)
         })
         .collect();
@@ -327,15 +149,19 @@ fn print_env_table(files: &IndexMap<String, EnvFileVars>, values: &EnvValues) {
 }
 
 // Confirm-then-fix: detection proposes, enter accepts, and only the wrong rows
-// cost keystrokes. Skipped without a TTY so scripted `ship init` still works.
+// cost keystrokes. Unattended runs accept detection.
 fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues) -> Result<()> {
-    if files.is_empty() || !std::io::stdin().is_terminal() {
+    if files.values().all(|vars| vars.is_empty()) {
         return Ok(());
     }
 
     loop {
         println!();
-        if !prompt::confirm("Change how any of these are handled?", false)? {
+        if !prompt::confirm(
+            "Change how any of these are handled?",
+            false,
+            Unattended::Answer(false),
+        )? {
             return Ok(());
         }
 
@@ -354,7 +180,8 @@ fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues
             .collect();
         rows.push(Row::new(None, [dim("Done")]));
 
-        let picked = prompt::pick("Which variable?", &["FILE", "VAR", "HANDLING"], rows)?;
+        // Only reached interactively: the confirm above answers no otherwise.
+        let picked = prompt::pick("Which variable?", &["FILE", "VAR", "HANDLING"], rows, "")?;
         let Some((file, key)) = picked.as_ref() else {
             return Ok(());
         };
@@ -372,6 +199,7 @@ fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues
             &format!("Handling for {key}"),
             &["HANDLING", "DETAIL"],
             rows,
+            "",
         )?;
 
         let path = if chosen == EnvVarType::DevUrl {
@@ -396,31 +224,19 @@ fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues
 }
 
 // Collect an ordered command sequence for one scope. When `flag` is non-empty
-// it wins outright (skip prompting). Otherwise the first prompt defaults to the
-// existing sequence (or `defaults`), and we keep asking for the next command
-// until the user submits a blank line.
-fn prompt_scope(
-    flag: Vec<String>,
-    label: &str,
-    defaults: &[&str],
-    existing: &[String],
-) -> Result<Vec<String>> {
+// it wins outright (skip prompting). Otherwise the prompts start from `seed` —
+// the stored or detected sequence — and keep asking for the next command until
+// a blank line. Unattended runs take the seed as is.
+fn prompt_scope(flag: Vec<String>, label: &str, seed: &[String]) -> Result<Vec<String>> {
     if !flag.is_empty() {
         return Ok(flag);
     }
-
-    // Seed prompts from the stored sequence, falling back to sensible defaults.
-    let seed: Vec<String> = if existing.is_empty() {
-        defaults.iter().map(|s| s.to_string()).collect()
-    } else {
-        existing.to_vec()
-    };
 
     let mut cmds = Vec::new();
     let mut i = 0;
     loop {
         let msg = if i == 0 {
-            format!("{label} command:")
+            format!("{label} command (blank for none):")
         } else {
             format!("{label} command #{} (blank to finish):", i + 1)
         };
@@ -437,16 +253,125 @@ fn prompt_scope(
 }
 
 // ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+
+/// Confirm or override the database: stored config on re-init, else what
+/// detection found. Flags win; no database means no prompts.
+fn resolve_database(
+    alias: &str,
+    stored: Option<DatabaseConfig>,
+    found: Option<DatabaseFound>,
+    opts: &mut InitArgs,
+) -> Result<Option<DatabaseConfig>> {
+    let base = stored.or_else(|| {
+        found.map(|found| DatabaseConfig {
+            runtime: found.runtime,
+            user: found.user,
+            source: found.source,
+            host: found.host,
+            port: found.port,
+            name_pattern: format!("{alias}_{{branch_slug_safe}}"),
+        })
+    });
+    let Some(mut db) = base else {
+        return Ok(None);
+    };
+
+    println!();
+    println!("  Database:");
+    println!(
+        "    Server           {}:{} {}",
+        blue(&db.host),
+        blue(db.port),
+        dim(match &db.runtime {
+            ExecutionRuntime::Docker { container } => format!("(docker: {container})"),
+            ExecutionRuntime::Local => "(local)".to_string(),
+        })
+    );
+    println!("    User             {}", blue(&db.user));
+    println!("    Source database  {}", blue(&db.source));
+    println!();
+
+    if let ExecutionRuntime::Docker { container } = &db.runtime {
+        let container = resolve(
+            opts.db_container.take(),
+            "Database container name:",
+            container,
+            "--db-container",
+        )?;
+        db.runtime = ExecutionRuntime::Docker { container };
+    } else if let Some(container) = opts.db_container.take() {
+        db.runtime = ExecutionRuntime::Docker { container };
+    }
+    db.user = resolve(opts.db_user.take(), "Database user:", &db.user, "--db-user")?;
+    db.source = resolve(
+        opts.db_source.take(),
+        "Source database to clone from:",
+        &db.source,
+        "--db-source",
+    )?;
+    Ok(Some(db))
+}
+
+// ---------------------------------------------------------------------------
+// Left empty
+// ---------------------------------------------------------------------------
+
+/// What detection could not fill and nothing else (stored config, flags,
+/// prompts) filled either.
+fn still_empty(left: Vec<LeftEmpty>, project: &ProjectConfig) -> Vec<LeftEmpty> {
+    left.into_iter()
+        .filter(|l| match l.field {
+            Field::Install => project.commands.install.is_empty(),
+            Field::Db => project.commands.db.is_empty(),
+            Field::Dev => project.commands.dev.is_empty(),
+            Field::Database => project.database.is_none(),
+        })
+        .collect()
+}
+
+fn print_left_empty(left: &[LeftEmpty]) {
+    if left.is_empty() {
+        return;
+    }
+    let rows: Vec<Row<()>> = left
+        .iter()
+        .map(|l| Row::new((), [l.field.key().to_string(), dim(&l.reason)]))
+        .collect();
+    let table = Table::measure(&rows);
+    println!(
+        "  {} Left empty \u{2014} no evidence in the repo:",
+        yellow("⚠")
+    );
+    for row in &rows {
+        println!("    {}", table.line(row, ""));
+    }
+    println!(
+        "  {}",
+        dim(format!(
+            "Fill these in {} if the project needs them, then check: ship config show --json",
+            config::config_path().display()
+        ))
+    );
+    println!();
+}
+
+// ---------------------------------------------------------------------------
 // ship init
 // ---------------------------------------------------------------------------
 
-pub fn run(args: InitArgs) {
-    if let Err(e) = run_inner(args) {
-        eprintln!("Error: {e}");
+pub fn run(args: InitArgs) -> ExitCode {
+    match run_inner(args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-fn run_inner(opts: InitArgs) -> Result<()> {
+fn run_inner(mut opts: InitArgs) -> Result<()> {
     let cwd = cwd_string();
     let dir_name = Path::new(&cwd)
         .file_name()
@@ -482,7 +407,12 @@ fn run_inner(opts: InitArgs) -> Result<()> {
     // 1. Project alias.
     let default_alias =
         alias_for_cwd.unwrap_or_else(|| dir_name.chars().take(3).collect::<String>());
-    let alias = resolve(opts.alias, "Project alias:", &default_alias)?;
+    let alias = resolve(
+        opts.alias.take(),
+        "Project alias:",
+        &default_alias,
+        "--alias",
+    )?;
 
     // Re-running init on a known alias updates it — prompts default to stored values.
     let existing = ship_config.projects.get(&alias).cloned();
@@ -501,62 +431,17 @@ fn run_inner(opts: InitArgs) -> Result<()> {
         .as_ref()
         .map(|e| e.path.clone())
         .unwrap_or_else(|| cwd.clone());
-    let project_path = resolve(opts.path, "Project path:", &default_path)?;
+    let project_path = resolve(opts.path.take(), "Project path:", &default_path, "--path")?;
 
-    // 3. Auto-detect .env files.
+    // 3. Read the repo.
     println!();
-    println!("  Scanning for .env files...");
-    let detected = detect_env_files(Path::new(&cwd));
-
-    let mut inferred_db_user = existing
-        .as_ref()
-        .map(|e| e.database.user.clone())
-        .unwrap_or_else(|| "postgres".to_string());
-    let mut inferred_db_host = existing
-        .as_ref()
-        .map(|e| e.database.host.clone())
-        .unwrap_or_else(|| "localhost".to_string());
-    let mut inferred_db_port = existing.as_ref().map(|e| e.database.port).unwrap_or(5432);
-    let mut inferred_db_source = existing
-        .as_ref()
-        .map(|e| e.database.source.clone())
-        .unwrap_or_else(|| "postgres".to_string());
-    let mut detected_files: IndexMap<String, EnvFileVars> = IndexMap::new();
-    let mut env_values: EnvValues = IndexMap::new();
-
-    for env in &detected {
-        let mut vars: EnvFileVars = IndexMap::new();
-        let mut file_values: IndexMap<String, String> = IndexMap::new();
-
-        for (key, value, var_type) in &env.vars {
-            vars.insert(
-                key.clone(),
-                EnvVarConfig {
-                    var_type: *var_type,
-                    path: None,
-                },
-            );
-            file_values.insert(key.clone(), value.clone());
-
-            // A sqlite/file: URL parses to None, so a local DATABASE_URL never
-            // clobbers the postgres connection details.
-            if *var_type == EnvVarType::DatabaseUrl && key == "DATABASE_URL" {
-                if let Some(parsed) = parse_database_url(value) {
-                    inferred_db_user = parsed.user;
-                    inferred_db_host = parsed.host;
-                    inferred_db_port = parsed.port;
-                    inferred_db_source = parsed.database;
-                }
-            }
-        }
-
-        detected_files.insert(env.file.clone(), vars);
-        env_values.insert(env.file.clone(), file_values);
-    }
+    println!("  Scanning the repo...");
+    let mut detected = detect::scan(Path::new(&cwd), opts.db_container.as_deref());
+    let left_empty = std::mem::take(&mut detected.left_empty);
 
     // Stored choices win over fresh detection — a var you moved to "leave
     // untouched" must not flip back on the next init.
-    let mut env_files = detected_files;
+    let mut env_files = std::mem::take(&mut detected.env);
     if let Some(e) = &existing {
         for (file, vars) in &e.env.files {
             let entry = env_files.entry(file.clone()).or_default();
@@ -567,81 +452,57 @@ fn run_inner(opts: InitArgs) -> Result<()> {
     }
 
     if env_files.is_empty() {
-        println!("    {}", dim("No .env files with recognized variables."));
+        println!("    {}", dim("No .env files."));
     } else {
-        print_env_table(&env_files, &env_values);
-        review_env_vars(&mut env_files, &env_values)?;
+        print_env_table(&env_files, &detected.env_values);
+        review_env_vars(&mut env_files, &detected.env_values)?;
     }
 
     // 3b. Local state to copy into each worktree.
-    println!();
-    println!("  Scanning for local state files...");
-    let detected_copy = detect_copy_paths(Path::new(&cwd));
+    let detected_copy = std::mem::take(&mut detected.copy);
     let stored_copy = existing
         .as_ref()
         .map(|e| e.copy.clone())
         .unwrap_or_default();
     let copy_paths = if detected_copy.is_empty() && stored_copy.is_empty() {
-        println!("    {}", dim("None found."));
         Vec::new()
     } else {
         review_copy_paths(&cwd, detected_copy, &stored_copy)?
     };
 
-    if !detected.is_empty() {
-        println!();
-        println!("  Inferred database config:");
-        println!("    User            {}", blue(&inferred_db_user));
-        println!(
-            "    Host            {}:{}",
-            blue(&inferred_db_host),
-            blue(inferred_db_port)
-        );
-        println!("    Source database  {}", blue(&inferred_db_source));
-        println!();
-    }
-
-    // 4. Database config (confirm or override).
-    let existing_container = existing
-        .as_ref()
-        .map(|e| e.database.docker_container().to_string())
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| "postgres".to_string());
-    let db_container = resolve(
-        opts.db_container,
-        "Database container name:",
-        &existing_container,
-    )?;
-    let db_user = resolve(opts.db_user, "Database user:", &inferred_db_user)?;
-    let db_source = resolve(
-        opts.db_source,
-        "Source database to clone from:",
-        &inferred_db_source,
+    // 4. Database: stored, else detected, else none.
+    let detected_commands = std::mem::take(&mut detected.commands);
+    let database = resolve_database(
+        &alias,
+        existing.as_ref().and_then(|e| e.database.clone()),
+        detected.database.take(),
+        &mut opts,
     )?;
 
     // 5. Command scopes — each an ordered sequence, blank line ends the scope.
-    let existing_cmds = existing
+    // A stored sequence wins over detection.
+    let stored_cmds = existing
         .as_ref()
         .map(|e| e.commands.clone())
         .unwrap_or_default();
+    let seed = |stored: &[String], found: &[String]| -> Vec<String> {
+        if stored.is_empty() { found } else { stored }.to_vec()
+    };
     println!();
     let install_cmds = prompt_scope(
-        opts.install_cmd,
+        std::mem::take(&mut opts.install_cmd),
         "Install",
-        &["pnpm install", "pnpm db generate"],
-        &existing_cmds.install,
+        &seed(&stored_cmds.install, &detected_commands.install),
     )?;
     let db_cmds = prompt_scope(
-        opts.db_cmd,
+        std::mem::take(&mut opts.db_cmd),
         "Database setup",
-        &["pnpm db migrate:deploy"],
-        &existing_cmds.db,
+        &seed(&stored_cmds.db, &detected_commands.db),
     )?;
     let dev_cmds = prompt_scope(
-        opts.dev_cmd,
+        std::mem::take(&mut opts.dev_cmd),
         "Dev",
-        &["pnpm dev -p {port}"],
-        &existing_cmds.dev,
+        &seed(&stored_cmds.dev, &detected_commands.dev),
     )?;
 
     // 6. Root checkout route — reuse domain/port if registered before.
@@ -659,15 +520,7 @@ fn run_inner(opts: InitArgs) -> Result<()> {
         path: project_path,
         domain: Some(root_domain.clone()),
         port: Some(root_port),
-        database: DatabaseConfig {
-            runtime: ExecutionRuntime::Docker {
-                container: db_container,
-            },
-            user: db_user,
-            source: db_source,
-            host: inferred_db_host,
-            port: inferred_db_port,
-        },
+        database,
         commands: CommandsConfig {
             install: install_cmds,
             db: db_cmds,
@@ -681,9 +534,9 @@ fn run_inner(opts: InitArgs) -> Result<()> {
             .unwrap_or_else(|| WorktreeConfig {
                 dir_pattern: format!("../{dir_name}-{{branch_slug}}/"),
                 proxy_domain_pattern: format!("{{branch_slug}}.{alias}.localhost"),
-                db_name_pattern: format!("{alias}_{{branch_slug_safe}}"),
             }),
     };
+    let left_empty = still_empty(left_empty, &project);
 
     config::add_project(&alias, project)?;
 
@@ -710,5 +563,6 @@ fn run_inner(opts: InitArgs) -> Result<()> {
         blue(root_port)
     );
     println!();
+    print_left_empty(&left_empty);
     Ok(())
 }

@@ -1,9 +1,10 @@
 use crate::domain::workspace_locate::locate_workspace;
-use crate::errors::Result;
-use crate::fmt::{bold, red};
+use crate::errors::{Error, Result};
+use crate::fmt::bold;
 use crate::services::config;
 use crate::services::database::{self, DbTarget};
 use crate::util::cwd_string;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship db exec <sql> — locate the current workspace (by cwd) and run SQL
@@ -12,31 +13,29 @@ use crate::util::cwd_string;
 #[derive(clap::Subcommand)]
 pub enum DbCmd {
     /// Execute SQL against the current workspace database
-    Exec { sql: String },
+    Exec {
+        /// SQL (or a psql meta-command like \dt)
+        sql: String,
+    },
 }
 
-pub fn run_exec(sql: &str) {
-    if let Err(e) = exec_inner(sql) {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
-    }
+pub fn run_exec(sql: &str) -> ExitCode {
+    super::finish(exec_inner(sql))
 }
 
 fn exec_inner(sql: &str) -> Result<()> {
     let workspaces = config::load_workspaces()?;
     let Some(workspace) = locate_workspace(&workspaces, &cwd_string(), None) else {
-        eprintln!(
-            "  {} Not inside a workspace. Navigate to a workspace directory first.",
-            red("✗")
-        );
-        return Ok(());
+        return Err(Error::NotInWorkspace);
     };
 
     let project_config = config::get_project(&workspace.project)?;
-    let output = database::query(
-        DbTarget::from(&project_config.database),
-        &workspace.db_name,
-        sql,
-    )?;
+    let (Some(db), Some(name)) = (&project_config.database, &workspace.db_name) else {
+        return Err(Error::NoDatabase {
+            alias: workspace.project.clone(),
+        });
+    };
+    let output = database::query(DbTarget::from(db), name, sql)?;
     println!("{}", output.trim_end());
     Ok(())
 }

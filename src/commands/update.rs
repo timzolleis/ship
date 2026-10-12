@@ -2,14 +2,19 @@ use crate::errors::Result;
 use crate::fmt::{bold, dim, green};
 use crate::services::updater;
 use crate::version::VERSION;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship update — download and install the latest release
 // ---------------------------------------------------------------------------
 
-pub fn run() {
-    if let Err(e) = run_inner() {
-        eprintln!("Error: {e}");
+pub fn run() -> ExitCode {
+    match run_inner() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

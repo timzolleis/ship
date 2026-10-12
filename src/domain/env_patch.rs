@@ -7,14 +7,15 @@ use std::sync::LazyLock;
 //     (comments, blanks, non KEY=VALUE lines) is preserved verbatim.
 //   - Keys absent from `vars` are preserved verbatim.
 //   - Surrounding single/double quotes are stripped from the value first.
-//   - database_url → swap the trailing /<segment> for /<db_name>.
+//   - database_url → swap the trailing /<segment> for /<db_name>; untouched
+//     when the project has no database (no name to swap in).
 //   - proxy_url    → swap the http(s)://<origin> for https://<proxy_domain>.
 //   - dev_url      → http://localhost:<port><configured path suffix>.
 //   - plain        → untouched.
 //   - A change is recorded (key/from/to) ONLY when the value actually changed.
 
 pub struct EnvPatchContext {
-    pub db_name: String,
+    pub db_name: Option<String>,
     pub proxy_domain: String,
     pub port: u16,
 }
@@ -68,9 +69,12 @@ pub fn patch_env_content(
 
         let value = strip_quotes(raw_value).to_string();
         let new_value = match var_config.var_type {
-            EnvVarType::DatabaseUrl => DB_TAIL_RE
-                .replace(&value, NoExpand(&format!("/{}", ctx.db_name)))
-                .into_owned(),
+            EnvVarType::DatabaseUrl => match &ctx.db_name {
+                Some(db_name) => DB_TAIL_RE
+                    .replace(&value, NoExpand(&format!("/{db_name}")))
+                    .into_owned(),
+                None => value.clone(),
+            },
             EnvVarType::ProxyUrl => ORIGIN_RE
                 .replace(&value, NoExpand(&format!("https://{}", ctx.proxy_domain)))
                 .into_owned(),
@@ -104,7 +108,7 @@ mod tests {
 
     fn ctx() -> EnvPatchContext {
         EnvPatchContext {
-            db_name: "znb_tim_feature".to_string(),
+            db_name: Some("znb_tim_feature".to_string()),
             proxy_domain: "tim-feature.znb.localhost".to_string(),
             port: 3210,
         }

@@ -1,8 +1,9 @@
 use crate::domain::workspace_locate::locate_workspace;
-use crate::errors::Result;
-use crate::fmt::{blue, bold, dim, green, red};
+use crate::errors::{Error, Result};
+use crate::fmt::{blue, bold, dim, green};
 use crate::services::{config, proxy, shell};
 use crate::util::cwd_string;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // ship up [--open]
@@ -19,10 +20,8 @@ struct UpTarget {
     path: String,
 }
 
-pub fn run(open: bool) {
-    if let Err(e) = run_inner(&cwd_string(), open) {
-        eprintln!("\n  {} {}\n", red("Error:"), e);
-    }
+pub fn run(open: bool) -> ExitCode {
+    super::finish(run_inner(&cwd_string(), open))
 }
 
 fn run_inner(cwd: &str, open: bool) -> Result<()> {
@@ -42,11 +41,7 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
             .iter()
             .find(|(_, p)| cwd == p.path || cwd.starts_with(&format!("{}/", p.path)));
         let Some((alias, root)) = entry else {
-            println!(
-                "  {} Not inside a workspace or registered project. Use 'ship init' or 'ship create' first.",
-                red("✗")
-            );
-            return Ok(());
+            return Err(Error::NotInProject);
         };
         let alias = alias.clone();
         let domain = root
@@ -101,7 +96,11 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
         );
         return Ok(());
     };
-    let resolved_last = last.replace("{port}", &target.port.to_string());
+    let port = target.port.to_string();
+    let resolved_last = last.replace("{port}", &port);
+    // Most dev servers read PORT, so a plain `pnpm run dev` lands on the routed
+    // port; `{port}` covers the ones that don't (vite --port {port}).
+    let env: &[(&str, &str)] = &[("PORT", &port)];
 
     // Open browser after a short delay, in the background.
     if open {
@@ -114,15 +113,15 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
 
     // Run any preparatory dev commands to completion, in order.
     for cmd in rest {
-        let resolved = cmd.replace("{port}", &target.port.to_string());
+        let resolved = cmd.replace("{port}", &port);
         println!("  {}", dim(format!("Running: {resolved}")));
-        shell::exec_in_dir(&target.path, &resolved, &[])?;
+        shell::exec_in_dir(&target.path, &resolved, env)?;
     }
 
     println!("  {}", dim(format!("Running: {resolved_last}")));
     println!();
 
     // Run the final dev command (blocks until it exits — the dev server).
-    shell::exec_in_dir(&target.path, &resolved_last, &[])?;
+    shell::exec_in_dir(&target.path, &resolved_last, env)?;
     Ok(())
 }

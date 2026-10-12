@@ -87,15 +87,19 @@ fn default_db_port() -> u16 {
     5432
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The project's postgres server. Absent when the project has none — every
+/// database step then skips (create, teardown, sync) or fails with
+/// `Error::NoDatabase` (reset, db exec, open db).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DatabaseConfig {
     pub runtime: ExecutionRuntime,
     pub user: String,
     pub source: String,
-    #[serde(default = "default_host")]
     pub host: String,
-    #[serde(default = "default_db_port")]
     pub port: u16,
+    /// Workspace database name, e.g. `{project}_{branch_slug_safe}`.
+    pub name_pattern: String,
 }
 
 impl DatabaseConfig {
@@ -173,10 +177,9 @@ impl<'de> Deserialize<'de> for EnvConfig {
 pub struct WorktreeConfig {
     pub dir_pattern: String,
     pub proxy_domain_pattern: String,
-    pub db_name_pattern: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProjectConfig {
     pub path: String,
     /// Root checkout route. Absent on projects registered before root routes
@@ -185,7 +188,8 @@ pub struct ProjectConfig {
     pub domain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    pub database: DatabaseConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<DatabaseConfig>,
     pub commands: CommandsConfig,
     pub env: EnvConfig,
     /// Gitignored paths copied into each new worktree — local state a checkout
@@ -194,6 +198,81 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
     pub worktree: WorktreeConfig,
+}
+
+// Decoded through a repr: the workspace database-name pattern used to live in
+// `worktree.dbNamePattern`. It moves into `database.namePattern` here, and the
+// next save writes the new shape. A project without a database drops it.
+#[derive(Deserialize)]
+struct DatabaseRepr {
+    runtime: ExecutionRuntime,
+    user: String,
+    source: String,
+    // Configs written before host/port existed only ever meant localhost:5432.
+    #[serde(default = "default_host")]
+    host: String,
+    #[serde(default = "default_db_port")]
+    port: u16,
+    #[serde(default, rename = "namePattern")]
+    name_pattern: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorktreeRepr {
+    dir_pattern: String,
+    proxy_domain_pattern: String,
+    #[serde(default)]
+    db_name_pattern: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProjectConfigRepr {
+    path: String,
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    database: Option<DatabaseRepr>,
+    commands: CommandsConfig,
+    env: EnvConfig,
+    #[serde(default)]
+    copy: Vec<String>,
+    worktree: WorktreeRepr,
+}
+
+impl<'de> Deserialize<'de> for ProjectConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let r = ProjectConfigRepr::deserialize(d)?;
+        let database = match r.database {
+            None => None,
+            Some(db) => Some(DatabaseConfig {
+                name_pattern: db
+                    .name_pattern
+                    .or(r.worktree.db_name_pattern)
+                    .ok_or_else(|| serde::de::Error::missing_field("database.namePattern"))?,
+                runtime: db.runtime,
+                user: db.user,
+                source: db.source,
+                host: db.host,
+                port: db.port,
+            }),
+        };
+        Ok(ProjectConfig {
+            path: r.path,
+            domain: r.domain,
+            port: r.port,
+            database,
+            commands: r.commands,
+            env: r.env,
+            copy: r.copy,
+            worktree: WorktreeConfig {
+                dir_pattern: r.worktree.dir_pattern,
+                proxy_domain_pattern: r.worktree.proxy_domain_pattern,
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -222,7 +301,9 @@ pub struct Workspace {
     pub branch: String,
     pub path: String,
     pub port: u16,
-    pub db_name: String,
+    /// Absent when the project has no database.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_name: Option<String>,
     pub proxy_domain: String,
     pub created: String,
 }
@@ -284,5 +365,43 @@ mod tests {
         let reparsed: EnvConfig =
             serde_json::from_str(&serde_json::to_string(&env).unwrap()).unwrap();
         assert_eq!(reparsed.files.len(), 1);
+    }
+
+    const PROJECT_REST: &str = r#""path": "/repo", "commands": {}, "env": { "files": {} }"#;
+
+    #[test]
+    fn legacy_db_name_pattern_moves_into_database() {
+        let json = format!(
+            r#"{{ {PROJECT_REST},
+              "database": {{ "runtime": {{ "_tag": "local" }}, "user": "postgres", "source": "app" }},
+              "worktree": {{ "dirPattern": "../app-{{branch_slug}}/", "proxyDomainPattern": "{{branch_slug}}.app.localhost", "dbNamePattern": "app_{{branch_slug_safe}}" }} }}"#
+        );
+        let pc: ProjectConfig = serde_json::from_str(&json).unwrap();
+        let db = pc.database.as_ref().unwrap();
+        assert_eq!(db.name_pattern, "app_{branch_slug_safe}");
+        assert_eq!((db.host.as_str(), db.port), ("localhost", 5432));
+
+        let written = serde_json::to_value(&pc).unwrap();
+        assert_eq!(written["database"]["namePattern"], "app_{branch_slug_safe}");
+        assert!(written["worktree"].get("dbNamePattern").is_none());
+    }
+
+    #[test]
+    fn project_without_a_database_drops_the_pattern() {
+        let json = format!(
+            r#"{{ {PROJECT_REST},
+              "worktree": {{ "dirPattern": "../app-{{branch_slug}}/", "proxyDomainPattern": "{{branch_slug}}.app.localhost", "dbNamePattern": "app_{{branch_slug_safe}}" }} }}"#
+        );
+        let pc: ProjectConfig = serde_json::from_str(&json).unwrap();
+        assert!(pc.database.is_none());
+        assert!(serde_json::to_value(&pc).unwrap().get("database").is_none());
+    }
+
+    #[test]
+    fn workspace_without_a_database_round_trips() {
+        let json = r#"{ "project": "app", "branch": "b", "path": "/p", "port": 5174, "proxyDomain": "b.app.localhost", "created": "2024-01-01" }"#;
+        let ws: Workspace = serde_json::from_str(json).unwrap();
+        assert!(ws.db_name.is_none());
+        assert!(serde_json::to_value(&ws).unwrap().get("dbName").is_none());
     }
 }

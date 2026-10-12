@@ -2,6 +2,7 @@ pub mod agent;
 pub mod config;
 pub mod copy;
 pub mod database;
+pub mod detect;
 pub mod editor;
 pub mod env;
 pub mod git;

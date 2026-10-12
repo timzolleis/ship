@@ -70,6 +70,26 @@ pub enum Error {
     #[error("No active workspaces. Create one with 'ship create <project> <branch>'.")]
     NoActiveWorkspaces,
 
+    #[error("No projects registered. Register one with 'ship init'.")]
+    NoProjects,
+
+    #[error("Not inside a workspace. Run this from a workspace directory.")]
+    NotInWorkspace,
+
+    #[error(
+        "Not inside a workspace or registered project. Use 'ship init' or 'ship create' first."
+    )]
+    NotInProject,
+
+    #[error("Unknown target '{target}'. Use: editor, url, db")]
+    UnknownTarget { target: String },
+
+    #[error("{prompt}: no terminal to ask. Pass {hint}.")]
+    NeedsInput { prompt: String, hint: String },
+
+    #[error("Project '{alias}' has no database. Add one under \"database\" in config.json (ship config show {alias}).")]
+    NoDatabase { alias: String },
+
     #[error("{0}")]
     Prompt(String),
 }

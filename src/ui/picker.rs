@@ -3,7 +3,6 @@ use crate::fmt::{blue, bold, dim, green};
 use crate::ui::table::{Row, Table};
 use crate::ui::{FRAMES, TICK};
 use console::{truncate_str, Key, Term};
-use std::io::IsTerminal;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
@@ -91,14 +90,21 @@ impl<T> Picker<T> {
 
     /// Returns the picked rows, cells included, so callers can keep what a
     /// background lookup found. Empty means cancelled or nothing checked.
-    pub fn interact(self) -> Result<Vec<Row<T>>> {
+    ///
+    /// Without a terminal nobody can pick: the rows are listed so the caller
+    /// sees the choices, and the run fails naming `hint` — the flag or
+    /// argument that answers the picker.
+    pub fn interact(self, hint: &str) -> Result<Vec<Row<T>>> {
         let term = Term::stderr();
         if self.rows.is_empty() {
             return Ok(Vec::new());
         }
-        if !term.is_term() || !std::io::stdin().is_terminal() {
+        if !super::interactive() {
             self.render_static(&term)?;
-            return Ok(Vec::new());
+            return Err(Error::NeedsInput {
+                prompt: self.msg,
+                hint: hint.to_string(),
+            });
         }
         self.run(&term)
     }
@@ -295,7 +301,7 @@ impl<T> Picker<T> {
         }
     }
 
-    /// Piped or scripted: show what would have been offered, pick nothing.
+    /// Piped or scripted: show what would have been offered.
     /// Waiting on a keypress nobody can send would hang the run.
     fn render_static(&self, term: &Term) -> Result<()> {
         let table = self.table();

@@ -3,7 +3,7 @@ use crate::domain::remote_branch::RemoteBranchAction;
 use crate::domain::removal::Removal;
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
-use crate::schema::{ExecutionRuntime, ProjectConfig, Workspace};
+use crate::schema::{DatabaseConfig, ExecutionRuntime, ProjectConfig, Workspace};
 use crate::services::copy::{self, CopyOutcome, CopyStatus};
 use crate::services::database::{self, DbTarget};
 use crate::services::env::{self, PatchResult};
@@ -154,8 +154,8 @@ pub struct TeardownOptions {
     pub remote_branch: RemoteBranchAction,
 }
 
-fn runtime_label(pc: &ProjectConfig) -> String {
-    match &pc.database.runtime {
+fn runtime_label(db: &DatabaseConfig) -> String {
+    match &db.runtime {
         ExecutionRuntime::Docker { container } => format!("docker:{container}"),
         ExecutionRuntime::Local => "local".to_string(),
     }
@@ -174,31 +174,41 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     let mut events: Vec<StepEvent<ProvisionStep>> = Vec::new();
 
     // 1. Derive names; resolve worktree dir against pc.path.
-    let names = derive_names(&pc.worktree, alias, branch);
+    let names = derive_names(&pc.worktree, pc.database.as_ref(), alias, branch);
     let worktree_dir = resolve_path(&pc.path, &names.worktree_dir_relative);
-    let target = DbTarget::from(&pc.database);
+    // The project's database and this workspace's name in it; None when the
+    // project has no database.
+    let db = pc.database.as_ref().zip(names.db_name.as_deref());
 
     // 2. Probe each resource defensively (probe failures = absent).
     let existing_ws = config::find_workspace(alias, branch).unwrap_or(None);
     let worktrees = git::worktree_list(&pc.path).unwrap_or_default();
     let worktree_exists = worktrees.iter().any(|w| w.path == worktree_dir);
 
-    let ping_ok = database::ping(target);
-    let db_exists = ping_ok && database::exists(target, &names.db_name);
+    let ping_ok = db.is_none_or(|(d, _)| database::ping(DbTarget::from(d)));
+    let db_exists =
+        ping_ok && db.is_some_and(|(d, name)| database::exists(DbTarget::from(d), name));
 
     let routes = proxy::get_routes().unwrap_or_default();
     let existing_route = routes.iter().find(|r| r.domain == names.proxy_domain);
 
-    // 3. Port precedence: registered ws → existing route → next_port.
-    let port = existing_ws
+    // 3. Port precedence: registered ws → existing route → next_port. A
+    // Caddyfile that can't be read fails here: a made-up port could collide.
+    let port = match existing_ws
         .as_ref()
         .map(|w| w.port)
         .or(existing_route.map(|r| r.port))
-        .unwrap_or_else(|| proxy::next_port().unwrap_or(5173));
+    {
+        Some(port) => port,
+        None => proxy::next_port()?,
+    };
 
-    // 4. All four present → short-circuit, no mutations.
-    let all_present =
-        existing_ws.is_some() && worktree_exists && db_exists && existing_route.is_some();
+    // 4. Everything present → short-circuit, no mutations. No database
+    // counts as present.
+    let all_present = existing_ws.is_some()
+        && worktree_exists
+        && (db.is_none() || db_exists)
+        && existing_route.is_some();
     if all_present {
         let workspace = existing_ws.unwrap_or_else(|| Workspace {
             project: alias.to_string(),
@@ -218,9 +228,9 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     }
 
     // 5. db unreachable → fail before any mutation.
-    if !ping_ok {
+    if let (false, Some((d, _))) = (ping_ok, db) {
         return Err(Error::DatabaseUnreachable {
-            runtime: runtime_label(pc),
+            runtime: runtime_label(d),
         });
     }
 
@@ -316,17 +326,22 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
 
     // 8e. database clone and install scope, side by side: neither reads the
     // other's output; only the db scope needs both. The clone captures its
-    // output, so the install's streamed output stays readable.
+    // output, so the install's streamed output stays readable. No database,
+    // no clone and no Database step.
     let (cloned, installed) = std::thread::scope(|s| {
-        let clone = (!db_exists)
-            .then(|| s.spawn(|| database::clone_db(target, &pc.database.source, &names.db_name)));
+        let clone = db.filter(|_| !db_exists).map(|(d, name)| {
+            s.spawn(move || database::clone_db(DbTarget::from(d), &d.source, name))
+        });
         let installed = (!pc.commands.install.is_empty())
             .then(|| run_scope(&worktree_dir, &pc.commands.install));
         let cloned = clone.map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)));
         (cloned, installed)
     });
     match cloned {
-        None => events.push(step(ProvisionStep::Database, Status::SkippedExisting, None)),
+        None if db.is_some() => {
+            events.push(step(ProvisionStep::Database, Status::SkippedExisting, None))
+        }
+        None => {}
         Some(r) => {
             r?;
             events.push(step(ProvisionStep::Database, Status::Done, None));
@@ -422,8 +437,6 @@ fn teardown_each(
     opts: &TeardownOptions,
     mut emit: impl FnMut(StepEvent<TeardownStep>),
 ) {
-    let target = DbTarget::from(&pc.database);
-
     emit(match proxy::remove_route(&ws.proxy_domain) {
         Ok(Removal::Removed) => step(TeardownStep::ProxyRoute, Status::Done, None),
         Ok(Removal::AlreadyGone) => step(TeardownStep::ProxyRoute, Status::SkippedExisting, None),
@@ -434,9 +447,16 @@ fn teardown_each(
         ),
     });
 
-    emit(match database::drop_db(target, &ws.db_name) {
-        Ok(()) => step(TeardownStep::Database, Status::Done, None),
-        Err(e) => step(TeardownStep::Database, Status::Warning, Some(e.to_string())),
+    emit(match (&pc.database, &ws.db_name) {
+        (Some(db), Some(name)) => match database::drop_db(DbTarget::from(db), name) {
+            Ok(()) => step(TeardownStep::Database, Status::Done, None),
+            Err(e) => step(TeardownStep::Database, Status::Warning, Some(e.to_string())),
+        },
+        _ => step(
+            TeardownStep::Database,
+            Status::SkippedExisting,
+            Some("no database".to_string()),
+        ),
     });
 
     if opts.remove_worktree {
@@ -506,12 +526,17 @@ fn teardown_each(
 
 pub fn reset_database(ws: &Workspace, pc: &ProjectConfig) -> Result<Vec<StepEvent<ResetStep>>> {
     let mut events = Vec::new();
-    let target = DbTarget::from(&pc.database);
+    let (Some(db), Some(name)) = (&pc.database, &ws.db_name) else {
+        return Err(Error::NoDatabase {
+            alias: ws.project.clone(),
+        });
+    };
+    let target = DbTarget::from(db);
 
-    database::drop_db(target, &ws.db_name)?;
+    database::drop_db(target, name)?;
     events.push(step(ResetStep::Drop, Status::Done, None));
 
-    database::clone_db(target, &pc.database.source, &ws.db_name)?;
+    database::clone_db(target, &db.source, name)?;
     events.push(step(ResetStep::Clone, Status::Done, None));
 
     for cmd in &pc.commands.db {

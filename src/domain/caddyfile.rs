@@ -4,8 +4,9 @@ use std::sync::LazyLock;
 // Pure Caddyfile route codec + port allocation. Semantics ported verbatim:
 //   - domain-block regex                   ^([a-z0-9][a-z0-9.\-]*)\s*\{
 //   - reverse_proxy host.docker.internal   reverse_proxy\s+host\.docker\.internal:(\d+)
-//   - remove_route: skip block lines, collapse blank runs (\n{3,} → \n\n),
-//     trim, then a single trailing newline.
+//   - remove_route: skip the block through its matching close brace (nested
+//     blocks included), collapse blank runs (\n{3,} → \n\n), trim, then a
+//     single trailing newline.
 //   - next_port: lowest free port above the base (hole-filling).
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,14 @@ pub struct Route {
 }
 
 pub const BASE_PORT: u16 = 5173;
+
+/// Upstream connections Caddy opens per dev server. Browsers multiplex a
+/// cold dev page's hundreds of module requests over one HTTP/2 connection;
+/// without a cap Caddy dials one upstream connection per request, overflows
+/// the server's listen backlog (macOS clamps it to 128) and answers 502.
+/// Excess requests wait for a free connection instead. Long-lived streams
+/// (HMR websockets) hold a slot each, so it stays well above a few tabs.
+pub const MAX_UPSTREAM_CONNS: u16 = 64;
 
 static DOMAIN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([a-z0-9][a-z0-9.\-]*)\s*\{").unwrap());
@@ -44,25 +53,35 @@ pub fn parse_routes(content: &str) -> Vec<Route> {
 }
 
 pub fn add_route(content: &str, domain: &str, port: u16) -> String {
-    format!("{content}\n{domain} {{\n    reverse_proxy host.docker.internal:{port}\n}}\n")
+    format!(
+        "{content}\n{domain} {{\n    reverse_proxy host.docker.internal:{port} {{\n        transport http {{\n            max_conns_per_host {MAX_UPSTREAM_CONNS}\n        }}\n    }}\n}}\n"
+    )
+}
+
+fn brace_delta(line: &str) -> i32 {
+    line.chars()
+        .map(|c| match c {
+            '{' => 1,
+            '}' => -1,
+            _ => 0,
+        })
+        .sum()
 }
 
 pub fn remove_route(content: &str, domain: &str) -> String {
     let mut result: Vec<&str> = Vec::new();
-    let mut skip = false;
+    let mut depth = 0;
     let block_start = format!("{domain} {{");
     for line in content.split('\n') {
-        if line.starts_with(&block_start) {
-            skip = true;
+        if depth == 0 && line.starts_with(&block_start) {
+            depth = brace_delta(line);
             continue;
         }
-        if skip && line.trim() == "}" {
-            skip = false;
+        if depth > 0 {
+            depth += brace_delta(line);
             continue;
         }
-        if !skip {
-            result.push(line);
-        }
+        result.push(line);
     }
     let joined = result.join("\n");
     let collapsed = BLANK_RUN_RE.replace_all(&joined, "\n\n");
@@ -76,4 +95,38 @@ pub fn next_port(routes: &[Route], base: u16) -> u16 {
         port += 1;
     }
     port
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FLAT: &str = "a.localhost {\n    reverse_proxy host.docker.internal:5174\n}\n";
+
+    #[test]
+    fn added_route_caps_upstream_connections() {
+        let content = add_route(FLAT, "b.localhost", 5175);
+        assert!(content.contains("max_conns_per_host 64"));
+        let routes = parse_routes(&content);
+        assert_eq!(routes.len(), 2);
+        assert_eq!((routes[1].domain.as_str(), routes[1].port), ("b.localhost", 5175));
+    }
+
+    #[test]
+    fn removes_a_nested_block_whole() {
+        let content = add_route(&add_route(FLAT, "b.localhost", 5175), "c.localhost", 5176);
+        let removed = remove_route(&content, "b.localhost");
+        assert!(!removed.contains("5175"));
+        assert_eq!(removed.matches('{').count(), removed.matches('}').count());
+        let domains: Vec<_> = parse_routes(&removed).into_iter().map(|r| r.domain).collect();
+        assert_eq!(domains, ["a.localhost", "c.localhost"]);
+    }
+
+    #[test]
+    fn removes_a_flat_block() {
+        let content = add_route(FLAT, "b.localhost", 5175);
+        let removed = remove_route(&content, "a.localhost");
+        let domains: Vec<_> = parse_routes(&removed).into_iter().map(|r| r.domain).collect();
+        assert_eq!(domains, ["b.localhost"]);
+    }
 }

@@ -35,6 +35,7 @@ src/
 │   ├── caddyfile.rs     # Route codec + next_port allocation
 │   ├── db_orphans.rs    # Databases matching a project pattern that no workspace claims
 │   ├── detect.rs        # What init may conclude from a repo: package manager, commands, env kinds, database
+│   ├── editor_launch.rs # Whether `create` opens the editor: flag, then terminal, then stored preference
 │   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url)
 │   ├── removal.rs       # Removed vs AlreadyGone — a teardown step's two successes
 │   ├── remote_branch.rs # Safe default vs explicit remote-branch deletion policy
@@ -86,7 +87,7 @@ skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzollei
 - **Prompts**: through `src/prompt.rs` only (it strips trailing `:` — dialoguer adds its own). A single choice is `prompt::pick(msg, header, rows, hint)`, which returns the picked row's value. Reach for `ui::Picker` directly only for checkboxes, streaming cells, or the picked row's cells.
 - **Unattended mode**: `ui::interactive()` (stdin and stderr are terminals) is the one switch. Without a terminal every prompt answers itself: `input` takes its default, `confirm` takes `Unattended::Answer(bool)` or fails with `Unattended::Require(hint)`, pickers fail. A failure is `Error::NeedsInput` naming the flag or argument that answers the prompt. A prompt with no safe answer gets a `Require` — never a guess.
 - **Never guess**: `init` writes a field only from evidence (`domain::detect`); with none it stays empty and lands in the `Left empty` report with the reason. No hardcoded fallbacks for project facts (commands, database, ports) — a failed lookup is an error, not a default.
-- **Editor opening**: always `editor::open()`, never exec an editor directly.
+- **Editor opening**: always `editor::open()`, never exec an editor directly. `create` asks `domain::editor_launch::decide`: `--editor`/`--no-editor` win; without a terminal it never opens, even with `autoOpenEditor: true` — agents make throwaway workspaces.
 - **Config JSON**: camelCase keys, 2-space pretty print, trailing newline. `IndexMap` preserves key order. Legacy shapes decode through a repr and are written back canonically on the next save — flat `env.autoDetected` (`EnvConfigRepr`) and `worktree.dbNamePattern` (`ProjectConfigRepr`, moved into `database.namePattern`). Keep that tolerance.
 - **Versioning**: `build.rs` embeds the git short SHA (or `$SHIP_VERSION` when set — CI uses this to pin the binary version to the release tag). Debug builds report `dev`, which disables update checks and self-update.
 - **Clippy after every change**: `cargo clippy` must stay warning-free.

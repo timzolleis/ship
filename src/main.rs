@@ -48,6 +48,12 @@ enum Cmd {
         /// Base branch for a new branch (default: the main checkout's upstream, e.g. origin/main)
         #[arg(long)]
         base: Option<String>,
+        /// Open the editor without asking (default: only with a terminal, per the stored preference)
+        #[arg(long, overrides_with = "no_editor")]
+        editor: bool,
+        /// Never open the editor
+        #[arg(long, overrides_with = "editor")]
+        no_editor: bool,
     },
     /// Tear down a workspace: route, database, worktree, local branch, and the remote branch once its PR is closed or merged
     Down {
@@ -161,7 +167,7 @@ fn help_text() -> String {
     {config_sessions} [on|off]   Delete agent sessions on teardown
 
   {lifecycle}
-    {create} [project] [branch]     Create or resume a workspace
+    {create} [project] [branch] [--no-editor]   Create or resume a workspace
     {down}   [project] [branch] [--remote]   Tear down a workspace
     {ls}     [project] [--json]     List active workspaces
 
@@ -195,7 +201,8 @@ fn help_text() -> String {
   {agents}
     npx skills add timzolleis/ship -g   Install the agent skill (any agent)
     Without a terminal, prompts take their safe default or exit 1 naming the
-    flag to pass. Every failure exits nonzero.
+    flag to pass. Every failure exits nonzero. `create` opens the editor only
+    with a terminal; `--editor` / `--no-editor` override that.
 
   {options}
     --help, -h                    Show help for any command
@@ -263,7 +270,16 @@ fn dispatch(cmd: Cmd) -> ExitCode {
             project,
             branch,
             base,
-        } => commands::create::run(project, branch, base),
+            editor,
+            no_editor,
+        } => {
+            let editor = match (editor, no_editor) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
+            commands::create::run(project, branch, base, editor)
+        }
         Cmd::Down {
             project,
             branch,

@@ -12,13 +12,14 @@ description: Per-branch dev workspaces with the ship CLI — a git worktree, a c
 - Prompts answer themselves: a safe default, or exit 1 with `Error: <prompt>: no terminal to ask. Pass <flag>.` Re-run with that flag or argument.
 - Exit 0 means everything landed. Exit 1 means it failed, or part of it did: `down` and `gc` keep failed workspaces in the registry, and re-running retries them.
 - Read state as JSON: `ship projects --json`, `ship ls [project] --json [--no-pr]`, `ship config show [alias] --json`.
+- `ship create` opens the user's editor only with a terminal. Pass `--no-editor` anyway (an agent pane may have one); pass `--editor` only when the user asks to see the workspace.
 - `ship <command> --help` lists every flag.
 
 ## Workspaces
 
 | Task | Command |
 |---|---|
-| Create or resume | `ship create <project> <branch> [--base <branch>]` |
+| Create or resume | `ship create <project> <branch> [--base <branch>] --no-editor` |
 | Find one | `ship ls <project> --json` → `path`, `proxyDomain`, `port`, `dbName` |
 | Dev server | `ship up` in the workspace directory. It blocks until the server exits: run it in the background. ship sets `PORT`. |
 | Re-clone the database | `ship reset` in the workspace directory |

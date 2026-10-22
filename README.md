@@ -23,7 +23,7 @@ Written in Rust. Single ~2 MB static binary, no runtime.
 | **Agent transcript cleanup** | Teardown removes the worktree's coding-agent session directories so transcripts don't pile up for dead branches. Toggle with `ship config sessions off`. |
 | **Editor integration** | Detects `$VISUAL`/`$EDITOR`, then Zed, Cursor, VS Code, Sublime, then nvim/vim/vi. Remembers what worked. |
 | **Self-updating** | `ship update` swaps the binary for the latest GitHub release. A background check runs at most hourly and prints a one-line notice when you're behind. |
-| **Agent-ready** | Without a terminal every prompt takes its safe default or exits 1 naming the flag to pass; every failure exits nonzero. `ls`, `projects` and `config show` take `--json`. `npx skills add timzolleis/ship -g` installs an agent skill for any agent. Color drops when stdout isn't a TTY or `NO_COLOR` is set. |
+| **Agent-ready** | Without a terminal every prompt takes its safe default or exits 1 naming the flag to pass; every failure exits nonzero. `ship create` opens the editor only with a terminal (`--editor` / `--no-editor` override). `ls`, `projects` and `config show` take `--json`. `npx skills add timzolleis/ship -g` installs an agent skill for any agent. Color drops when stdout isn't a TTY or `NO_COLOR` is set. |
 | **Never guesses** | `ship init` fills a field only from evidence in the repo and lists what it left empty, with the reason. Projects without Postgres work: every database step skips. |
 
 ## Install
@@ -90,6 +90,7 @@ Project setup
 Workspace lifecycle
   ship create [project] [branch]        Create or resume a workspace
   ship create ep feat --base develop    Branch off a specific base
+  ship create ep feat --no-editor       Don't open the editor (--editor forces it)
   ship down [project] [branch]          Tear down (cwd workspace, or a picker)
   ship down --force                     Skip confirmation and dirty-worktree checks
   ship down --db-only                   Drop the database and route, keep the worktree
@@ -187,6 +188,7 @@ line numbers in `config.json`, for when you'd rather edit the file directly.
 ship create ep tim/ep-241            # explicit
 ship create                          # pick the project, type the branch
 ship create ep tim/ep-241 --base develop
+ship create ep tim/ep-241 --no-editor
 ```
 
 What happens, in order:
@@ -210,7 +212,10 @@ What happens, in order:
    source, Postgres refuses that, and ship falls back to `createdb` + `pg_dump | psql`.
 8. **db** scope runs inside the worktree, migrating the clone.
 9. **Proxy route** is added to the Caddyfile and Caddy is reloaded.
-10. **Editor** opens. The first time, ship asks whether to always do this.
+10. **Editor** opens. The first time, ship asks whether to always do this
+    (`autoOpenEditor`). Without a terminal it never opens, whatever the preference, so
+    agents don't get an editor window per workspace. `--editor` / `--no-editor` override
+    both.
 
 ### `ship down` and `ship gc`
 

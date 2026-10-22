@@ -1,3 +1,4 @@
+use crate::domain::editor_launch::{self, EditorLaunch};
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, red, yellow};
@@ -168,11 +169,17 @@ fn render_env_changes(results: &[PatchResult]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// ship create [project] [branch] [--base <branch>]
+// ship create [project] [branch] [--base <branch>] [--editor|--no-editor]
 // ---------------------------------------------------------------------------
 
-pub fn run(project: Option<String>, branch: Option<String>, base: Option<String>) -> ExitCode {
-    match run_inner(project, branch, base) {
+/// `editor` is `--editor` (Some(true)) / `--no-editor` (Some(false)).
+pub fn run(
+    project: Option<String>,
+    branch: Option<String>,
+    base: Option<String>,
+    editor: Option<bool>,
+) -> ExitCode {
+    match run_inner(project, branch, base, editor) {
         Err(e @ Error::DatabaseUnreachable { .. }) => {
             eprintln!();
             eprintln!("  {} {}", red("✗"), e);
@@ -188,6 +195,7 @@ fn run_inner(
     project_opt: Option<String>,
     branch_opt: Option<String>,
     base: Option<String>,
+    editor_flag: Option<bool>,
 ) -> Result<()> {
     // 1. Resolve project (prompt if not specified).
     let project = match project_opt {
@@ -263,7 +271,15 @@ fn run_inner(
             w.port
         );
         println!();
-        if prompt::confirm("Open in editor?", true, Unattended::Answer(false))? {
+        // A resumed workspace always asks; the stored preference is for new ones.
+        let open = match editor_launch::decide(editor_flag, None, ui::interactive()) {
+            EditorLaunch::Open => true,
+            EditorLaunch::Skip => false,
+            EditorLaunch::Ask => {
+                prompt::confirm("Open in editor?", true, Unattended::Answer(false))?
+            }
+        };
+        if open {
             editor::open(&w.path);
         }
         return Ok(());
@@ -279,14 +295,19 @@ fn run_inner(
         }
     }
 
-    // 4. Auto-open editor (prompt once; persist preference). Unattended runs
-    // don't open it and don't store an answer nobody gave.
+    // 4. Editor: the flag wins; otherwise only a terminal session opens it
+    // (prompt once, persist the answer). Unattended runs store nothing.
     println!();
     let mut ship_config = config::load_config()?;
-    let should_open = match ship_config.auto_open_editor {
-        Some(v) => v,
-        None if !ui::interactive() => false,
-        None => {
+    let launch = editor_launch::decide(
+        editor_flag,
+        ship_config.auto_open_editor,
+        ui::interactive(),
+    );
+    let should_open = match launch {
+        EditorLaunch::Open => true,
+        EditorLaunch::Skip => false,
+        EditorLaunch::Ask => {
             let v = prompt::confirm("Open workspace in editor?", true, Unattended::Answer(false))?;
             ship_config.auto_open_editor = Some(v);
             config::save_config(&ship_config)?;

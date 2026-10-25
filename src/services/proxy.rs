@@ -1,4 +1,4 @@
-use crate::domain::caddyfile::{self, Route, BASE_PORT};
+use crate::domain::caddyfile::{self, Route};
 use crate::domain::removal::Removal;
 use crate::errors::{Error, Result};
 use crate::services::{config, shell};
@@ -190,10 +190,6 @@ pub fn trust() -> Result<()> {
         ],
     )
     .map(|_| ())
-}
-
-pub fn next_port() -> Result<u16> {
-    Ok(caddyfile::next_port(&get_routes()?, BASE_PORT))
 }
 
 pub fn edit_caddyfile() -> Result<()> {

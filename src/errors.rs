@@ -10,6 +10,15 @@ fn shell_exec_message(command: &str, stderr: &str) -> String {
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Port name '{name}' can't be used: lowercase letters, digits, '-' and '_', starting with a letter.")]
+    InvalidPortName { name: String },
+
+    #[error("No port named '{name}' (used by {place}). Declare it in the project's \"ports\".")]
+    UnknownPort { name: String, place: String },
+
+    #[error("--port {name}={value}: '{value}' is not a port.")]
+    InvalidPortValue { name: String, value: String },
+
     #[error("Project '{alias}' not found. Run 'ship init' first.")]
     ProjectNotFound { alias: String },
 

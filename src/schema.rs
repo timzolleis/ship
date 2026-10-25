@@ -22,14 +22,16 @@ pub enum EnvVarType {
     DatabaseUrl,
     ProxyUrl,
     DevUrl,
+    Port,
     Plain,
 }
 
 impl EnvVarType {
-    pub const ALL: [EnvVarType; 4] = [
+    pub const ALL: [EnvVarType; 5] = [
         EnvVarType::DatabaseUrl,
         EnvVarType::ProxyUrl,
         EnvVarType::DevUrl,
+        EnvVarType::Port,
         EnvVarType::Plain,
     ];
 
@@ -40,6 +42,7 @@ impl EnvVarType {
             EnvVarType::DatabaseUrl => "database_url",
             EnvVarType::ProxyUrl => "proxy_url",
             EnvVarType::DevUrl => "dev_url",
+            EnvVarType::Port => "port",
             EnvVarType::Plain => "plain",
         }
     }
@@ -50,6 +53,7 @@ impl EnvVarType {
             EnvVarType::DatabaseUrl => "swap database name",
             EnvVarType::ProxyUrl => "swap proxy domain",
             EnvVarType::DevUrl => "point at local dev port",
+            EnvVarType::Port => "set to the workspace port",
             EnvVarType::Plain => "leave untouched",
         }
     }
@@ -59,6 +63,7 @@ impl EnvVarType {
             EnvVarType::DatabaseUrl => "swap the trailing /name for the workspace database",
             EnvVarType::ProxyUrl => "swap the origin for the workspace proxy domain",
             EnvVarType::DevUrl => "replace with http://localhost:<port><path>",
+            EnvVarType::Port => "replace with the port number",
             EnvVarType::Plain => {
                 "copy verbatim — use for sqlite paths and anything worktree-relative"
             }
@@ -73,6 +78,10 @@ pub struct EnvVarConfig {
     /// Path suffix appended after the port. `dev_url` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// A named port of the project (`ports`) instead of the routed one.
+    /// `dev_url` and `port` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +197,10 @@ pub struct ProjectConfig {
     pub domain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Extra ports beside the routed one, by name → the root checkout's port.
+    /// Each workspace gets its own (`Workspace::ports`); none is routed.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub ports: IndexMap<String, u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<DatabaseConfig>,
     pub commands: CommandsConfig,
@@ -234,6 +247,8 @@ struct ProjectConfigRepr {
     #[serde(default)]
     port: Option<u16>,
     #[serde(default)]
+    ports: IndexMap<String, u16>,
+    #[serde(default)]
     database: Option<DatabaseRepr>,
     commands: CommandsConfig,
     env: EnvConfig,
@@ -263,6 +278,7 @@ impl<'de> Deserialize<'de> for ProjectConfig {
             path: r.path,
             domain: r.domain,
             port: r.port,
+            ports: r.ports,
             database,
             commands: r.commands,
             env: r.env,
@@ -301,6 +317,9 @@ pub struct Workspace {
     pub branch: String,
     pub path: String,
     pub port: u16,
+    /// This workspace's value for each of the project's named ports.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub ports: IndexMap<String, u16>,
     /// Absent when the project has no database.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db_name: Option<String>,
@@ -403,5 +422,20 @@ mod tests {
         let ws: Workspace = serde_json::from_str(json).unwrap();
         assert!(ws.db_name.is_none());
         assert!(serde_json::to_value(&ws).unwrap().get("dbName").is_none());
+    }
+
+    #[test]
+    fn named_ports_round_trip_and_stay_out_when_empty() {
+        let json = r#"{ "project": "app", "branch": "b", "path": "/p", "port": 5174, "ports": { "api": 5175 }, "proxyDomain": "b.app.localhost", "created": "2024-01-01" }"#;
+        let ws: Workspace = serde_json::from_str(json).unwrap();
+        assert_eq!(ws.ports["api"], 5175);
+        assert_eq!(serde_json::to_value(&ws).unwrap()["ports"]["api"], 5175);
+
+        let pc: ProjectConfig = serde_json::from_str(&format!(
+            r#"{{ {PROJECT_REST}, "worktree": {{ "dirPattern": "../a-{{branch_slug}}/", "proxyDomainPattern": "{{branch_slug}}.a.localhost" }} }}"#
+        ))
+        .unwrap();
+        assert!(pc.ports.is_empty());
+        assert!(serde_json::to_value(&pc).unwrap().get("ports").is_none());
     }
 }

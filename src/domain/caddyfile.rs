@@ -7,15 +7,14 @@ use std::sync::LazyLock;
 //   - remove_route: skip the block through its matching close brace (nested
 //     blocks included), collapse blank runs (\n{3,} → \n\n), trim, then a
 //     single trailing newline.
-//   - next_port: lowest free port above the base (hole-filling).
+// Port allocation lives in `domain::ports`: routes share their pool with the
+// projects' named ports.
 
 #[derive(Debug, Clone)]
 pub struct Route {
     pub domain: String,
     pub port: u16,
 }
-
-pub const BASE_PORT: u16 = 5173;
 
 /// Upstream connections Caddy opens per dev server. Browsers multiplex a
 /// cold dev page's hundreds of module requests over one HTTP/2 connection;
@@ -88,15 +87,6 @@ pub fn remove_route(content: &str, domain: &str) -> String {
     format!("{}\n", collapsed.trim())
 }
 
-pub fn next_port(routes: &[Route], base: u16) -> u16 {
-    let used: std::collections::HashSet<u16> = routes.iter().map(|r| r.port).collect();
-    let mut port = base + 1;
-    while used.contains(&port) {
-        port += 1;
-    }
-    port
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,7 +99,10 @@ mod tests {
         assert!(content.contains("max_conns_per_host 64"));
         let routes = parse_routes(&content);
         assert_eq!(routes.len(), 2);
-        assert_eq!((routes[1].domain.as_str(), routes[1].port), ("b.localhost", 5175));
+        assert_eq!(
+            (routes[1].domain.as_str(), routes[1].port),
+            ("b.localhost", 5175)
+        );
     }
 
     #[test]
@@ -118,7 +111,10 @@ mod tests {
         let removed = remove_route(&content, "b.localhost");
         assert!(!removed.contains("5175"));
         assert_eq!(removed.matches('{').count(), removed.matches('}').count());
-        let domains: Vec<_> = parse_routes(&removed).into_iter().map(|r| r.domain).collect();
+        let domains: Vec<_> = parse_routes(&removed)
+            .into_iter()
+            .map(|r| r.domain)
+            .collect();
         assert_eq!(domains, ["a.localhost", "c.localhost"]);
     }
 
@@ -126,7 +122,10 @@ mod tests {
     fn removes_a_flat_block() {
         let content = add_route(FLAT, "b.localhost", 5175);
         let removed = remove_route(&content, "a.localhost");
-        let domains: Vec<_> = parse_routes(&removed).into_iter().map(|r| r.domain).collect();
+        let domains: Vec<_> = parse_routes(&removed)
+            .into_iter()
+            .map(|r| r.domain)
+            .collect();
         assert_eq!(domains, ["b.localhost"]);
     }
 }

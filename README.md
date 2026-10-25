@@ -16,6 +16,7 @@ Written in Rust. Single ~2 MB static binary, no runtime.
 | **Local state carried over** | Gitignored files a checkout can't bring (sqlite databases, certs, fixtures) are copied into the new worktree. |
 | **HTTPS for every branch** | A Caddy container serves `https://tim-ep-241.ep.localhost` and proxies to the port ship allocated. Trust the CA once, no browser warnings after. |
 | **Custom command sequences** | Per project: an ordered `install` scope, a `db` scope (migrate, seed) and a `dev` scope. `PORT` is set and `{port}` is substituted. Blank line ends a scope during `ship init`. |
+| **Named ports** | A project that runs more than one server (web + API) declares extra ports, e.g. `api`. Each workspace gets its own `api` port next to the routed one, as `API_PORT` and `{port:api}`, so two workspaces never fight over `:3000`. |
 | **Idempotent, resumable create** | Every resource is probed first. A create that died halfway picks up where it stopped, and a finished one just re-opens the editor. |
 | **Fresh base** | A new worktree branches from the just-fetched `origin/main` (or `origin/<base>`); the main checkout is left alone. |
 | **PR-aware listing and cleanup** | `ship ls` streams PR status from `gh` into the table. `ship gc` preselects workspaces whose PR is merged and tears them down, remote branch included. |
@@ -164,7 +165,10 @@ anything it couldn't tell is left empty and listed at the end with the reason.
    - `install` runs after the worktree exists (`pnpm install`, ...)
    - `db` runs after the database is cloned and on `ship reset` (`pnpm exec prisma migrate deploy`, seeds, ...)
    - `dev` runs on `ship up`; the last entry is the long-running server. `PORT` is set and `{port}` is replaced
-6. **Root route.** `https://<alias>.localhost` is registered for the main checkout, so
+6. **Named ports.** Only from `--port`: there is nothing in a repo to detect them from.
+   `--port api=3000` keeps the main checkout on `:3000`; a bare `--port api` takes a free
+   port. Stored ones survive a re-run.
+7. **Root route.** `https://<alias>.localhost` is registered for the main checkout, so
    `ship up` from the project root works too.
 
 Re-running `ship init` on a known alias updates it. Every prompt defaults to the
@@ -176,7 +180,8 @@ ship init --alias ep --path . \
   --db-container postgres --db-user dashboard --db-source dashboard \
   --install-cmd "pnpm install" --install-cmd "pnpm db generate" \
   --db-cmd "pnpm db migrate:deploy" \
-  --dev-cmd "pnpm web dev -p {port}"
+  --dev-cmd "pnpm web dev -p {port}" \
+  --port api=3000
 ```
 
 `ship config show` prints the resulting env handling and copy list together with the
@@ -245,7 +250,10 @@ All three modes accept `--dry-run`.
 Run inside a workspace or the project root. Starts the proxy container if it isn't
 running, ensures the route, prints the URL, then runs the `dev` scope in order. All
 but the last command run to completion; the last one is the server and blocks. Every
-command gets `PORT` set to the workspace port.
+command gets `PORT` set to the workspace port, and one `<NAME>_PORT` per named port
+(`api` → `API_PORT`, `admin-api` → `ADMIN_API_PORT`); `{port}` and `{port:<name>}` are
+substituted, and an unknown name fails before anything runs. A port the project named
+after the workspace was created is allocated here and saved.
 `--open` opens the browser two seconds in. A dev server that exits nonzero does not
 fail `ship up`.
 
@@ -368,9 +376,11 @@ tim-ep-241.ep.localhost {
 | `database_url` | `postgres://u:p@localhost:5432/dashboard` | `postgres://u:p@localhost:5432/ep_tim_ep_241` |
 | `proxy_url` | `https://ep.localhost/some/path` | `https://tim-ep-241.ep.localhost/some/path` |
 | `dev_url` (path `/api/auth`) | `http://localhost:3000/api/auth` | `http://localhost:5175/api/auth` |
+| `dev_url` (port `api`) | `http://localhost:3000` | `http://localhost:5176` |
+| `port` (port `api`) | `3000` | `5176` |
 | `plain` | `file:../../dev/database.db` | `file:../../dev/database.db` |
 
-Only `KEY=VALUE` lines whose key is configured are touched. Comments, blank lines and
+`dev_url` and `port` take the routed port, or the named port in `"port"`. Only `KEY=VALUE` lines whose key is configured are touched. Comments, blank lines and
 unconfigured keys are preserved byte for byte.
 
 ## Configuration
@@ -398,6 +408,7 @@ All state lives in `~/.config/ship/`:
       "path": "/Users/tim/IdeaProjects/elternportal",
       "domain": "ep.localhost",
       "port": 5174,
+      "ports": { "api": 3000 },
       "database": {
         "runtime": { "_tag": "docker", "container": "postgres" },
         "user": "dashboard",
@@ -417,7 +428,8 @@ All state lives in `~/.config/ship/`:
             "DATABASE_URL": { "type": "database_url" },
             "BASE_URL": { "type": "proxy_url" },
             "BETTER_AUTH_URL": { "type": "proxy_url" },
-            "OAUTH_CALLBACK_URL": { "type": "dev_url", "path": "/api/auth/callback" }
+            "OAUTH_CALLBACK_URL": { "type": "dev_url", "path": "/api/auth/callback" },
+            "API_URL": { "type": "dev_url", "port": "api" }
           },
           "apps/console/.env": {
             "DATABASE_URL": { "type": "plain" }
@@ -433,6 +445,10 @@ All state lives in `~/.config/ship/`:
   }
 }
 ```
+
+`ports` names extra ports beside the routed `port`, each with the main checkout's
+value. Every workspace gets its own (`ports` in its `workspaces.json` entry), from the
+same pool as the routes, so no two collide. None is routed through the proxy.
 
 `database.runtime` can also be `{ "_tag": "local" }` to run the Postgres CLI tools on
 the host instead of inside a container. Leave `database` out for a project without

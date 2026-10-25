@@ -1,4 +1,5 @@
 use crate::domain::env_patch::EnvPatchContext;
+use crate::domain::ports as domain_ports;
 use crate::domain::remote_branch::RemoteBranchAction;
 use crate::domain::removal::Removal;
 use crate::domain::workspace_name::derive_names;
@@ -8,7 +9,7 @@ use crate::services::copy::{self, CopyOutcome, CopyStatus};
 use crate::services::database::{self, DbTarget};
 use crate::services::env::{self, PatchResult};
 use crate::services::shell::{self, NON_INTERACTIVE_ENV};
-use crate::services::{agent, config, git, proxy};
+use crate::services::{agent, config, git, ports, proxy};
 use crate::util::resolve_path;
 use std::sync::mpsc;
 
@@ -172,6 +173,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     let alias = input.project_alias;
     let branch = input.branch;
     let mut events: Vec<StepEvent<ProvisionStep>> = Vec::new();
+    ports::check(pc)?;
 
     // 1. Derive names; resolve worktree dir against pc.path.
     let names = derive_names(&pc.worktree, pc.database.as_ref(), alias, branch);
@@ -192,20 +194,32 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     let routes = proxy::get_routes().unwrap_or_default();
     let existing_route = routes.iter().find(|r| r.domain == names.proxy_domain);
 
-    // 3. Port precedence: registered ws → existing route → next_port. A
-    // Caddyfile that can't be read fails here: a made-up port could collide.
+    // 3. Port precedence: registered ws → existing route → next free. Named
+    // ports keep the registered ones and take free ports for the rest. A
+    // Caddyfile or registry that can't be read fails here: a made-up port
+    // could collide.
+    let mut used = ports::used()?;
     let port = match existing_ws
         .as_ref()
         .map(|w| w.port)
         .or(existing_route.map(|r| r.port))
     {
         Some(port) => port,
-        None => proxy::next_port()?,
+        None => domain_ports::next_free(&used, domain_ports::BASE_PORT),
     };
+    used.insert(port);
+    let named_ports = domain_ports::assign(
+        &pc.ports,
+        &existing_ws
+            .as_ref()
+            .map(|w| w.ports.clone())
+            .unwrap_or_default(),
+        &mut used,
+    );
 
     // 4. Everything present → short-circuit, no mutations. No database
     // counts as present.
-    let all_present = existing_ws.is_some()
+    let all_present = existing_ws.as_ref().is_some_and(|w| w.ports == named_ports)
         && worktree_exists
         && (db.is_none() || db_exists)
         && existing_route.is_some();
@@ -215,6 +229,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
             branch: branch.to_string(),
             path: worktree_dir.clone(),
             port,
+            ports: named_ports.clone(),
             db_name: names.db_name.clone(),
             proxy_domain: names.proxy_domain.clone(),
             created: String::new(),
@@ -247,18 +262,32 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
 
     // 7. Register the workspace entry FIRST.
     let was_registered = existing_ws.is_some();
-    let workspace = existing_ws.unwrap_or_else(|| Workspace {
-        project: alias.to_string(),
-        branch: branch.to_string(),
-        path: worktree_dir.clone(),
-        port,
-        db_name: names.db_name.clone(),
-        proxy_domain: names.proxy_domain.clone(),
-        created: today_iso(),
-    });
-    if !was_registered {
-        config::add_workspace(workspace.clone())?;
-    }
+    let workspace = match existing_ws {
+        // A port named since the workspace registered gets its value now.
+        Some(ws) if ws.ports != named_ports => {
+            let ws = Workspace {
+                ports: named_ports,
+                ..ws
+            };
+            config::update_workspace(&ws)?;
+            ws
+        }
+        Some(ws) => ws,
+        None => {
+            let ws = Workspace {
+                project: alias.to_string(),
+                branch: branch.to_string(),
+                path: worktree_dir.clone(),
+                port,
+                ports: named_ports,
+                db_name: names.db_name.clone(),
+                proxy_domain: names.proxy_domain.clone(),
+                created: today_iso(),
+            };
+            config::add_workspace(ws.clone())?;
+            ws
+        }
+    };
     events.push(step(
         ProvisionStep::Register,
         if was_registered {
@@ -315,6 +344,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
             db_name: names.db_name.clone(),
             proxy_domain: names.proxy_domain.clone(),
             port,
+            ports: workspace.ports.clone(),
         },
     )?;
     let change_count: usize = env_changes.iter().map(|r| r.changes.len()).sum();

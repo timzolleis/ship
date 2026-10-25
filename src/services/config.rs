@@ -124,6 +124,17 @@ pub fn add_workspace(ws: Workspace) -> Result<()> {
     save_workspaces(&all)
 }
 
+/// Replaces a registered workspace in place, keeping the registry's order.
+pub fn update_workspace(ws: &Workspace) -> Result<()> {
+    let mut all = load_workspaces()?;
+    for w in all.iter_mut() {
+        if w.project == ws.project && w.branch == ws.branch {
+            *w = ws.clone();
+        }
+    }
+    save_workspaces(&all)
+}
+
 pub fn remove_workspace(project: &str, branch: &str) -> Result<()> {
     let mut all = load_workspaces()?;
     all.retain(|w| !(w.project == project && w.branch == branch));

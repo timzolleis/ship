@@ -1,4 +1,5 @@
 use crate::schema::{EnvFileVars, EnvVarType};
+use indexmap::IndexMap;
 use regex::{NoExpand, Regex};
 use std::sync::LazyLock;
 
@@ -11,13 +12,28 @@ use std::sync::LazyLock;
 //     when the project has no database (no name to swap in).
 //   - proxy_url    → swap the http(s)://<origin> for https://<proxy_domain>.
 //   - dev_url      → http://localhost:<port><configured path suffix>.
+//   - port         → <port>.
 //   - plain        → untouched.
+//   - dev_url and port take the routed port, or the named one in `port`; a
+//     name the workspace lacks leaves the value untouched (`ports::check`
+//     rejects that config before anything runs).
 //   - A change is recorded (key/from/to) ONLY when the value actually changed.
 
 pub struct EnvPatchContext {
     pub db_name: Option<String>,
     pub proxy_domain: String,
     pub port: u16,
+    /// The workspace's named ports.
+    pub ports: IndexMap<String, u16>,
+}
+
+impl EnvPatchContext {
+    fn port_for(&self, name: Option<&str>) -> Option<u16> {
+        match name {
+            None => Some(self.port),
+            Some(name) => self.ports.get(name).copied(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -78,10 +94,17 @@ pub fn patch_env_content(
             EnvVarType::ProxyUrl => ORIGIN_RE
                 .replace(&value, NoExpand(&format!("https://{}", ctx.proxy_domain)))
                 .into_owned(),
-            EnvVarType::DevUrl => {
-                let url_path = var_config.path.as_deref().unwrap_or("");
-                format!("http://localhost:{}{}", ctx.port, url_path)
-            }
+            EnvVarType::DevUrl => match ctx.port_for(var_config.port.as_deref()) {
+                Some(port) => {
+                    let url_path = var_config.path.as_deref().unwrap_or("");
+                    format!("http://localhost:{port}{url_path}")
+                }
+                None => value.clone(),
+            },
+            EnvVarType::Port => match ctx.port_for(var_config.port.as_deref()) {
+                Some(port) => port.to_string(),
+                None => value.clone(),
+            },
             EnvVarType::Plain => value.clone(),
         };
 
@@ -111,6 +134,7 @@ mod tests {
             db_name: Some("znb_tim_feature".to_string()),
             proxy_domain: "tim-feature.znb.localhost".to_string(),
             port: 3210,
+            ports: [("api".to_string(), 3211)].into_iter().collect(),
         }
     }
 
@@ -123,6 +147,7 @@ mod tests {
                     EnvVarConfig {
                         var_type: *t,
                         path: None,
+                        port: None,
                     },
                 )
             })
@@ -167,5 +192,26 @@ mod tests {
             "# comment\nSECRET=abc\nBETTER_AUTH_URL=https://tim-feature.znb.localhost"
         );
         assert_eq!(out.changes.len(), 1);
+    }
+
+    #[test]
+    fn named_ports_fill_dev_urls_and_port_vars() {
+        let vars: EnvFileVars = serde_json::from_str(
+            r#"{
+              "API_URL": { "type": "dev_url", "port": "api", "path": "/api" },
+              "API_PORT": { "type": "port", "port": "api" },
+              "PORT": { "type": "port" }
+            }"#,
+        )
+        .unwrap();
+        let out = patch_env_content(
+            "API_URL=http://localhost:3000/api\nAPI_PORT=3000\nPORT=5173",
+            &vars,
+            &ctx(),
+        );
+        assert_eq!(
+            out.content,
+            "API_URL=http://localhost:3211/api\nAPI_PORT=3211\nPORT=3210"
+        );
     }
 }

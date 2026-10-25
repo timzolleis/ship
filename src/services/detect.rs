@@ -72,6 +72,7 @@ pub fn scan(root: &Path, db_container: Option<&str>) -> Detected {
                 EnvVarConfig {
                     var_type: kind,
                     path: None,
+                    port: None,
                 },
             );
             values.insert(key, value);

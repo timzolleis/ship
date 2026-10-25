@@ -1,7 +1,7 @@
 use crate::domain::removal::Removal;
 use crate::errors::Result;
 use crate::fmt::{blue, bold, dim, green, yellow};
-use crate::services::proxy;
+use crate::services::{ports, proxy};
 use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ pub fn run(cmd: Option<ProxyCmd>) -> ExitCode {
             )
         }),
         Some(ProxyCmd::Edit) => proxy::edit_caddyfile(),
-        Some(ProxyCmd::NextPort) => proxy::next_port().map(|port| println!("{port}")),
+        Some(ProxyCmd::NextPort) => ports::next_free().map(|port| println!("{port}")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

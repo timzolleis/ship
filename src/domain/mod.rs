@@ -3,6 +3,7 @@ pub mod db_orphans;
 pub mod detect;
 pub mod editor_launch;
 pub mod env_patch;
+pub mod ports;
 pub mod remote_branch;
 pub mod removal;
 pub mod session_slug;

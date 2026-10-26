@@ -8,7 +8,6 @@ use crate::services::env::PatchResult;
 use crate::services::workspace::{provision, ProvisionInput, ProvisionStep, Status, StepEvent};
 use crate::services::{config, editor};
 use crate::ui::{self, Row, Table};
-use crate::util::resolve_path;
 use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
@@ -240,8 +239,6 @@ fn run_inner(
         &project,
         &branch,
     );
-    let worktree_dir = resolve_path(&project_config.path, &names.worktree_dir_relative);
-
     println!();
 
     // 3. Provision.
@@ -254,7 +251,8 @@ fn run_inner(
 
     let ctx = RenderContext {
         branch: branch.clone(),
-        worktree_dir,
+        // Provision may adopt a checkout made outside ship; its path wins.
+        worktree_dir: outcome.workspace.path.clone(),
         database: names
             .db_name
             .clone()

@@ -1,0 +1,11 @@
+id = "ship"
+name = "ship"
+version = "0.1.0"
+description = "Provision a ship workspace (database, .env, proxy route) for every Herdr worktree in a ship project"
+min_herdr_version = "0.9.5"
+platforms = ["macos", "linux"]
+
+# Hooks run with the plugin root as cwd.
+[[events]]
+on = "worktree.created"
+command = ["sh", "worktree-created.sh"]

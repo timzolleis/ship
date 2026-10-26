@@ -168,6 +168,23 @@ fn today_iso() -> String {
 
 // -- provision --------------------------------------------------------------
 
+/// Where the branch's workspace lives: wherever the branch is already checked
+/// out — another tool (Herdr) may have made the worktree — else `pattern_dir`.
+/// The main checkout never counts: a workspace needs its own worktree.
+fn worktree_dir_for(
+    worktrees: &[git::WorktreeEntry],
+    main_checkout: &str,
+    branch: &str,
+    pattern_dir: String,
+) -> String {
+    let main = main_checkout.trim_end_matches('/');
+    worktrees
+        .iter()
+        .find(|w| w.branch == branch && w.path.trim_end_matches('/') != main)
+        .map(|w| w.path.clone())
+        .unwrap_or(pattern_dir)
+}
+
 pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     let pc = input.project_config;
     let alias = input.project_alias;
@@ -175,16 +192,22 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     let mut events: Vec<StepEvent<ProvisionStep>> = Vec::new();
     ports::check(pc)?;
 
-    // 1. Derive names; resolve worktree dir against pc.path.
+    // 1. Derive names; resolve the worktree dir: the branch's existing
+    // checkout, else the pattern dir against pc.path.
     let names = derive_names(&pc.worktree, pc.database.as_ref(), alias, branch);
-    let worktree_dir = resolve_path(&pc.path, &names.worktree_dir_relative);
+    let worktrees = git::worktree_list(&pc.path).unwrap_or_default();
+    let worktree_dir = worktree_dir_for(
+        &worktrees,
+        &pc.path,
+        branch,
+        resolve_path(&pc.path, &names.worktree_dir_relative),
+    );
     // The project's database and this workspace's name in it; None when the
     // project has no database.
     let db = pc.database.as_ref().zip(names.db_name.as_deref());
 
     // 2. Probe each resource defensively (probe failures = absent).
     let existing_ws = config::find_workspace(alias, branch).unwrap_or(None);
-    let worktrees = git::worktree_list(&pc.path).unwrap_or_default();
     let worktree_exists = worktrees.iter().any(|w| w.path == worktree_dir);
 
     let ping_ok = db.is_none_or(|(d, _)| database::ping(DbTarget::from(d)));
@@ -219,7 +242,9 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
 
     // 4. Everything present → short-circuit, no mutations. No database
     // counts as present.
-    let all_present = existing_ws.as_ref().is_some_and(|w| w.ports == named_ports)
+    let all_present = existing_ws
+        .as_ref()
+        .is_some_and(|w| w.ports == named_ports && w.path == worktree_dir)
         && worktree_exists
         && (db.is_none() || db_exists)
         && existing_route.is_some();
@@ -263,10 +288,12 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     // 7. Register the workspace entry FIRST.
     let was_registered = existing_ws.is_some();
     let workspace = match existing_ws {
-        // A port named since the workspace registered gets its value now.
-        Some(ws) if ws.ports != named_ports => {
+        // A port named since the workspace registered gets its value now. A
+        // checkout adopted after a failed run moves the entry to its path.
+        Some(ws) if ws.ports != named_ports || ws.path != worktree_dir => {
             let ws = Workspace {
                 ports: named_ports,
+                path: worktree_dir.clone(),
                 ..ws
             };
             config::update_workspace(&ws)?;
@@ -587,6 +614,42 @@ mod tests {
             force: true,
             remote_branch,
         }
+    }
+
+    fn wt(path: &str, branch: &str) -> git::WorktreeEntry {
+        git::WorktreeEntry {
+            path: path.to_string(),
+            branch: branch.to_string(),
+        }
+    }
+
+    #[test]
+    fn adopts_the_branch_checkout_made_outside_ship() {
+        let worktrees = [
+            wt("/code/app", "main"),
+            wt("/home/.herdr/worktrees/app/feat-x", "feat-x"),
+        ];
+        let dir = worktree_dir_for(&worktrees, "/code/app", "feat-x", "/code/app-feat-x".into());
+        assert_eq!(dir, "/home/.herdr/worktrees/app/feat-x");
+    }
+
+    #[test]
+    fn falls_back_to_the_pattern_dir() {
+        let worktrees = [wt("/code/app", "main")];
+        let dir = worktree_dir_for(&worktrees, "/code/app", "feat-x", "/code/app-feat-x".into());
+        assert_eq!(dir, "/code/app-feat-x");
+    }
+
+    #[test]
+    fn never_adopts_the_main_checkout() {
+        let worktrees = [wt("/code/app", "feat-x")];
+        let dir = worktree_dir_for(
+            &worktrees,
+            "/code/app/",
+            "feat-x",
+            "/code/app-feat-x".into(),
+        );
+        assert_eq!(dir, "/code/app-feat-x");
     }
 
     /// Every remote-branch decision needs a row so kept branches explain why.

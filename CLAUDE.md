@@ -32,11 +32,12 @@ src/
 ├── schema.rs            # serde models: ShipConfig, ProjectConfig, Workspace, UpdateCache
 ├── util.rs              # resolve_path (Node path.resolve semantics), cwd_string, plural
 ├── domain/              # Pure logic — no IO, no subprocesses
-│   ├── caddyfile.rs     # Route codec + next_port allocation
+│   ├── caddyfile.rs     # Route codec
 │   ├── db_orphans.rs    # Databases matching a project pattern that no workspace claims
 │   ├── detect.rs        # What init may conclude from a repo: package manager, commands, env kinds, database
 │   ├── editor_launch.rs # Whether `create` opens the editor: flag, then terminal, then stored preference
-│   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url)
+│   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url/port)
+│   ├── ports.rs         # Port pool, named-port assignment, <NAME>_PORT, {port:<name>} substitution
 │   ├── removal.rs       # Removed vs AlreadyGone — a teardown step's two successes
 │   ├── remote_branch.rs # Safe default vs explicit remote-branch deletion policy
 │   ├── session_slug.rs  # Agent session dir name ↔ path (a `-` is a literal or a `/`)
@@ -51,6 +52,7 @@ src/
 │   ├── detect.rs        # Reads a repo for init: .env files, lockfiles, package.json, ignored state, docker ports
 │   ├── config.rs        # ~/.config/ship/ config + workspace registry (self-migrating load)
 │   ├── copy.rs          # Copies gitignored local state into a new worktree
+│   ├── ports.rs         # Ports in use (routes + every project and workspace), next free, checks
 │   ├── proxy.rs         # Caddy reverse proxy via docker
 │   ├── editor.rs        # Detect & open editors ($VISUAL/$EDITOR → GUI apps → terminal)
 │   ├── env.rs           # .env file copying/patching (delegates rewriting to domain)
@@ -90,11 +92,12 @@ skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzollei
 - **Editor opening**: always `editor::open()`, never exec an editor directly. `create` asks `domain::editor_launch::decide`: `--editor`/`--no-editor` win; without a terminal it never opens, even with `autoOpenEditor: true` — agents make throwaway workspaces.
 - **Config JSON**: camelCase keys, 2-space pretty print, trailing newline. `IndexMap` preserves key order. Legacy shapes decode through a repr and are written back canonically on the next save — flat `env.autoDetected` (`EnvConfigRepr`) and `worktree.dbNamePattern` (`ProjectConfigRepr`, moved into `database.namePattern`). Keep that tolerance.
 - **Versioning**: `build.rs` embeds the git short SHA (or `$SHIP_VERSION` when set — CI uses this to pin the binary version to the release tag). Debug builds report `dev`, which disables update checks and self-update.
+- **Ports come from one pool**: routed ports and named ports (`ProjectConfig.ports`, `Workspace.ports`) are allocated by `services::ports` from everything in use — Caddy routes, every project's root ports, every workspace's ports. Never allocate from the Caddyfile alone: a named port isn't routed, so a route allocator that skips it hands out a workspace's `api` port. `create` and `index` assign named ports; `up` backfills names added later. `ports::check` runs before anything mutates.
 - **Clippy after every change**: `cargo clippy` must stay warning-free.
 
 ## Error Variants (src/errors.rs)
 
-`ProjectNotFound`, `ParseConfig`, `ConfigOutdated`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `NoProjects`, `NotInWorkspace`, `NotInProject`, `UnknownTarget`, `NeedsInput`, `NoDatabase`, `Prompt`.
+`InvalidPortName`, `UnknownPort`, `InvalidPortValue`, `ProjectNotFound`, `ParseConfig`, `ConfigOutdated`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `NoProjects`, `NotInWorkspace`, `NotInProject`, `UnknownTarget`, `NeedsInput`, `NoDatabase`, `Prompt`.
 
 ## Config Storage
 

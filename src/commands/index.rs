@@ -1,11 +1,13 @@
+use crate::domain::ports as domain_ports;
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, yellow};
 use crate::prompt::{self, Unattended};
 use crate::schema::Workspace;
 use crate::services::database::{self, DbTarget};
-use crate::services::{config, git, proxy};
+use crate::services::{config, git, ports, proxy};
 use crate::util::plural;
+use indexmap::IndexMap;
 use std::collections::HashSet;
 use std::process::ExitCode;
 
@@ -39,7 +41,7 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
     let mut total_indexed = 0usize;
     let mut total_skipped = 0usize;
     let mut total_candidates = 0usize;
-    let mut used_ports: HashSet<u16> = existing_routes.iter().map(|r| r.port).collect();
+    let mut used_ports: HashSet<u16> = ports::used()?;
 
     println!();
 
@@ -112,14 +114,13 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
             let port = match route {
                 Some(r) => r.port,
                 None => {
-                    let mut p = proxy::next_port()?;
-                    while used_ports.contains(&p) {
-                        p += 1;
-                    }
+                    let p = domain_ports::next_free(&used_ports, domain_ports::BASE_PORT);
                     used_ports.insert(p);
                     p
                 }
             };
+            let named_ports =
+                domain_ports::assign(&project_config.ports, &IndexMap::new(), &mut used_ports);
 
             println!();
             println!("  {} {}  {}", blue("•"), bold(&wt.branch), dim(&wt.path));
@@ -134,6 +135,10 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
                     dim("(no route)")
                 }
             );
+
+            for (name, p) in &named_ports {
+                println!("      Port   {name} :{p}");
+            }
 
             if dry_run {
                 println!("      {}", yellow("would index"));
@@ -159,6 +164,7 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
                 branch: wt.branch.clone(),
                 path: wt.path.clone(),
                 port,
+                ports: named_ports,
                 db_name: names.db_name.clone(),
                 proxy_domain: names.proxy_domain.clone(),
                 created: chrono::Utc::now().format("%Y-%m-%d").to_string(),

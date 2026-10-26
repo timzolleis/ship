@@ -36,7 +36,19 @@ pub fn run(project: Option<String>, no_pr: bool, json: bool) -> ExitCode {
 pub const COLUMNS: [&str; 3] = ["PROJECT", "BRANCH", "PORT"];
 
 pub fn cells(ws: &Workspace) -> [String; 3] {
-    [dim(&ws.project), bold(&ws.branch), blue(ws.port)]
+    [dim(&ws.project), bold(&ws.branch), port_cell(ws)]
+}
+
+/// The routed port, then each named one: `5181  api 5182`.
+fn port_cell(ws: &Workspace) -> String {
+    std::iter::once(blue(ws.port))
+        .chain(
+            ws.ports
+                .iter()
+                .map(|(name, port)| format!("{} {}", dim(name), blue(port))),
+        )
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 fn header(no_pr: bool) -> Row<()> {

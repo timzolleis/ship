@@ -1,4 +1,5 @@
 use crate::domain::editor_launch::{self, EditorLaunch};
+use crate::domain::ports as domain_ports;
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, red, yellow};
@@ -21,6 +22,7 @@ struct RenderContext {
     database: Option<(String, String)>,
     proxy_domain: String,
     port: u16,
+    ports: indexmap::IndexMap<String, u16>,
 }
 
 /// Shorten a URL/db value for the env-change diff column.
@@ -138,6 +140,11 @@ fn render_event(e: &StepEvent<ProvisionStep>, ctx: &RenderContext) -> Vec<String
                 )],
                 Status::Done => vec![format!("  {} {:<14} {}", green("✓"), "Proxy", route)],
             }
+            .into_iter()
+            .chain(ctx.ports.iter().map(|(name, port)| {
+                ok_line(&domain_ports::env_name(name), &format!(":{}", blue(port)))
+            }))
+            .collect()
         }
         _ => vec![],
     }
@@ -254,6 +261,7 @@ fn run_inner(
             .zip(project_config.database.as_ref().map(|d| d.source.clone())),
         proxy_domain: names.proxy_domain.clone(),
         port: outcome.workspace.port,
+        ports: outcome.workspace.ports.clone(),
     };
     for event in &outcome.events {
         for line in render_event(event, &ctx) {
@@ -270,6 +278,9 @@ fn run_inner(
             blue(format!("https://{}", w.proxy_domain)),
             w.port
         );
+        for (name, port) in &w.ports {
+            println!("  {}: :{port}", domain_ports::env_name(name));
+        }
         println!();
         // A resumed workspace always asks; the stored preference is for new ones.
         let open = match editor_launch::decide(editor_flag, None, ui::interactive()) {
@@ -299,11 +310,8 @@ fn run_inner(
     // (prompt once, persist the answer). Unattended runs store nothing.
     println!();
     let mut ship_config = config::load_config()?;
-    let launch = editor_launch::decide(
-        editor_flag,
-        ship_config.auto_open_editor,
-        ui::interactive(),
-    );
+    let launch =
+        editor_launch::decide(editor_flag, ship_config.auto_open_editor, ui::interactive());
     let should_open = match launch {
         EditorLaunch::Open => true,
         EditorLaunch::Skip => false,

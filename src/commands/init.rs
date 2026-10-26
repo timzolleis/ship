@@ -1,4 +1,5 @@
 use crate::domain::detect::{DatabaseFound, Field, LeftEmpty};
+use crate::domain::ports as domain_ports;
 use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, yellow};
 use crate::prompt::{self, Unattended};
@@ -7,7 +8,7 @@ use crate::schema::{
     ExecutionRuntime, ProjectConfig, ShipConfig, WorktreeConfig,
 };
 use crate::services::detect::{self, EnvValues};
-use crate::services::{config, copy, proxy};
+use crate::services::{config, copy, ports, proxy};
 use crate::ui::{self, Row, Table};
 use crate::util::cwd_string;
 use indexmap::IndexMap;
@@ -40,6 +41,45 @@ pub struct InitArgs {
     /// Dev server command; repeat for a sequence. ship sets PORT, and {port} is substituted (default: the package.json dev script)
     #[arg(long)]
     dev_cmd: Vec<String>,
+    /// Extra port beside the routed one, e.g. `api=3000` (the root checkout's port) or `api` (allocated); repeat for more. Each workspace gets its own; `ship up` sets API_PORT and substitutes {port:api}
+    #[arg(long = "port", value_name = "NAME[=PORT]")]
+    ports: Vec<String>,
+}
+
+/// Stored named ports, then the flags: `name=port` sets the root checkout's
+/// port, a bare `name` keeps the stored one or takes the next free port.
+fn resolve_named_ports(
+    stored: &IndexMap<String, u16>,
+    flags: &[String],
+    root_port: u16,
+) -> Result<IndexMap<String, u16>> {
+    let mut named = stored.clone();
+    let mut used = ports::used()?;
+    used.insert(root_port);
+    for flag in flags {
+        let (name, value) = match flag.split_once('=') {
+            Some((name, value)) => {
+                let port = value.parse::<u16>().map_err(|_| Error::InvalidPortValue {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                })?;
+                (name, Some(port))
+            }
+            None => (flag.as_str(), None),
+        };
+        if !domain_ports::is_valid_name(name) {
+            return Err(Error::InvalidPortName {
+                name: name.to_string(),
+            });
+        }
+        let port = match value.or_else(|| named.get(name).copied()) {
+            Some(port) => port,
+            None => domain_ports::next_free(&used, domain_ports::BASE_PORT),
+        };
+        used.insert(port);
+        named.insert(name.to_string(), port);
+    }
+    Ok(named)
 }
 
 fn resolve(opt: Option<String>, msg: &str, default: &str, hint: &str) -> Result<String> {
@@ -213,9 +253,14 @@ fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues
             None
         };
 
+        // A named port only means something to the kinds that take a port.
+        let port = matches!(chosen, EnvVarType::DevUrl | EnvVarType::Port)
+            .then(|| files[file][key].port.clone())
+            .flatten();
         files[file][key] = EnvVarConfig {
             var_type: chosen,
             path,
+            port,
         };
 
         println!();
@@ -512,14 +557,23 @@ fn run_inner(mut opts: InitArgs) -> Result<()> {
         .unwrap_or_else(|| format!("{alias}.localhost"));
     let root_port = match existing.as_ref().and_then(|e| e.port) {
         Some(p) => p,
-        None => proxy::next_port()?,
+        None => ports::next_free()?,
     };
+    let named_ports = resolve_named_ports(
+        &existing
+            .as_ref()
+            .map(|e| e.ports.clone())
+            .unwrap_or_default(),
+        &std::mem::take(&mut opts.ports),
+        root_port,
+    )?;
 
     // 7. Build the config — keep customized worktree patterns.
     let project = ProjectConfig {
         path: project_path,
         domain: Some(root_domain.clone()),
         port: Some(root_port),
+        ports: named_ports,
         database,
         commands: CommandsConfig {
             install: install_cmds,
@@ -562,6 +616,15 @@ fn run_inner(mut opts: InitArgs) -> Result<()> {
         bold(&root_domain),
         blue(root_port)
     );
+    for (name, port) in &config::get_project(&alias)?.ports {
+        println!(
+            "  {} Port {:<9} :{} {}",
+            green("✓"),
+            name,
+            blue(port),
+            dim(format!("({})", domain_ports::env_name(name)))
+        );
+    }
     println!();
     print_left_empty(&left_empty);
     Ok(())

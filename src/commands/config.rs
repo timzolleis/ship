@@ -1,3 +1,4 @@
+use crate::domain::ports as domain_ports;
 use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, yellow};
 use crate::schema::{EnvVarType, ProjectConfig};
@@ -250,6 +251,8 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) -> Resul
 
     if project.env.files.is_empty() {
         println!("  {}", dim("No .env files configured."));
+        print_copy_paths(alias, project, lines);
+        print_named_ports(alias, project, lines);
         return Ok(());
     }
 
@@ -295,10 +298,13 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) -> Resul
                     None => String::new(),
                 },
             };
-            let handling = match (&cfg.var_type, &cfg.path) {
-                (EnvVarType::DevUrl, Some(p)) => format!("{} {p}", cfg.var_type.label()),
-                _ => cfg.var_type.label().to_string(),
-            };
+            let mut handling = cfg.var_type.label().to_string();
+            if let Some(name) = &cfg.port {
+                handling = format!("{handling} '{name}'");
+            }
+            if let (EnvVarType::DevUrl, Some(p)) = (&cfg.var_type, &cfg.path) {
+                handling = format!("{handling} {p}");
+            }
             rows.push(Row::new(
                 (),
                 [blue(file_cell), key.clone(), handling, dim(line)],
@@ -322,6 +328,7 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) -> Resul
     }
 
     print_copy_paths(alias, project, lines);
+    print_named_ports(alias, project, lines);
     Ok(())
 }
 
@@ -342,6 +349,38 @@ fn print_copy_paths(alias: &str, project: &ProjectConfig, lines: &LineMap) {
     println!("  COPIED INTO EACH WORKSPACE  {}", dim(line));
     for path in &project.copy {
         println!("    {}", blue(path));
+    }
+}
+
+fn print_named_ports(alias: &str, project: &ProjectConfig, lines: &LineMap) {
+    println!();
+    if project.ports.is_empty() {
+        println!(
+            "  {}",
+            dim("NAMED PORTS  none — add them to \"ports\", or ship init --port api=3000")
+        );
+        return;
+    }
+    let line = lines
+        .line_of(&["projects", alias, "ports"])
+        .map(|l| format!("line {l}"))
+        .unwrap_or_default();
+    println!(
+        "  NAMED PORTS  {}",
+        dim(format!(
+            "{line}  (root checkout's port; each workspace gets its own)"
+        ))
+    );
+    for (name, port) in &project.ports {
+        println!(
+            "    {:<10} :{}  {}",
+            name,
+            blue(port),
+            dim(format!(
+                "{} · {{port:{name}}}",
+                domain_ports::env_name(name)
+            ))
+        );
     }
 }
 

@@ -208,7 +208,8 @@ What happens, in order:
    (`origin/main`), or `origin/<base>` with `--base`. The main checkout is not pulled,
    installed or migrated; that is `ship sync`. A failed fetch is a warning.
 4. **Worktree** at the configured `dirPattern`: an existing branch, or a new one from
-   the start ref, created with `--no-track` so `git push` never targets main.
+   the start ref, created with `--no-track` so `git push` never targets main. A branch
+   already checked out in another worktree (one Herdr made, say) is adopted where it is.
 5. **Copy** the project's `copy` paths into the worktree. A missing source is a warning.
 6. **Env.** Each configured `.env` is copied and its variables rewritten. The changes
    are printed as a before/after diff.

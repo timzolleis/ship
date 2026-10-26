@@ -19,7 +19,7 @@ description: Per-branch dev workspaces with the ship CLI — a git worktree, a c
 
 | Task | Command |
 |---|---|
-| Create or resume | `ship create <project> <branch> [--base <branch>] --no-editor` |
+| Create or resume | `ship create <project> <branch> [--base <branch>] --no-editor`. A branch already checked out in another worktree is adopted at its path. |
 | Find one | `ship ls <project> --json` → `path`, `proxyDomain`, `port`, `ports`, `dbName` |
 | Dev server | `ship up` in the workspace directory. It blocks until the server exits: run it in the background. ship sets `PORT`, plus `<NAME>_PORT` per named port. |
 | Re-clone the database | `ship reset` in the workspace directory |

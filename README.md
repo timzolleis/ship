@@ -456,6 +456,19 @@ the host instead of inside a container. Leave `database` out for a project witho
 Postgres. Older configs with a flat `env.autoDetected` map or a `worktree.dbNamePattern`
 are still read and rewritten to the current shape on the next save.
 
+### Herdr
+
+`herdr-plugin/` provisions a ship workspace for every worktree Herdr creates in a ship
+project: Herdr's new-worktree dialog makes the worktree, and the plugin runs
+`ship create` in the new workspace's pane (database, `.env`, install, proxy route).
+Other repos are left alone.
+
+```bash
+herdr plugin install timzolleis/ship/herdr-plugin   # or: herdr plugin link ./herdr-plugin
+```
+
+Needs `ship` and `jq` on the Herdr server's `PATH`.
+
 ### Agent sessions
 
 Coding agents keep transcripts outside the worktree, keyed by its path. Ship knows the

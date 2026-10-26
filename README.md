@@ -208,7 +208,8 @@ What happens, in order:
    (`origin/main`), or `origin/<base>` with `--base`. The main checkout is not pulled,
    installed or migrated; that is `ship sync`. A failed fetch is a warning.
 4. **Worktree** at the configured `dirPattern`: an existing branch, or a new one from
-   the start ref, created with `--no-track` so `git push` never targets main.
+   the start ref, created with `--no-track` so `git push` never targets main. A branch
+   already checked out in another worktree (one Herdr made, say) is adopted where it is.
 5. **Copy** the project's `copy` paths into the worktree. A missing source is a warning.
 6. **Env.** Each configured `.env` is copied and its variables rewritten. The changes
    are printed as a before/after diff.
@@ -454,6 +455,19 @@ same pool as the routes, so no two collide. None is routed through the proxy.
 the host instead of inside a container. Leave `database` out for a project without
 Postgres. Older configs with a flat `env.autoDetected` map or a `worktree.dbNamePattern`
 are still read and rewritten to the current shape on the next save.
+
+### Herdr
+
+`herdr-plugin/` provisions a ship workspace for every worktree Herdr creates in a ship
+project: Herdr's new-worktree dialog makes the worktree, and the plugin runs
+`ship create` in the new workspace's pane (database, `.env`, install, proxy route).
+Other repos are left alone.
+
+```bash
+herdr plugin install timzolleis/ship/herdr-plugin   # or: herdr plugin link ./herdr-plugin
+```
+
+Needs `ship` and `jq` on the Herdr server's `PATH`.
 
 ### Agent sessions
 

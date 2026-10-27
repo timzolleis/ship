@@ -1,5 +1,7 @@
 use crate::commands::teardown;
-use crate::domain::remote_branch::{self, RemoteBranchAction, RemoteBranchPolicy};
+use crate::domain::remote_branch::{
+    self, PullRequestBranchState, RemoteBranchAction, RemoteBranchPolicy,
+};
 use crate::domain::workspace_locate::locate_workspace;
 use crate::errors::{Error, Result};
 use crate::fmt::{bold, dim, green, red, yellow};
@@ -16,11 +18,17 @@ use std::process::ExitCode;
 // ship down [project] [branch] [--force] [--db-only] [--remote]
 // ---------------------------------------------------------------------------
 
-fn down_options(db_only: bool, force: bool, remote_branch: RemoteBranchAction) -> TeardownOptions {
+fn down_options(
+    db_only: bool,
+    force: bool,
+    pull_request: PullRequestBranchState,
+    remote_branch: RemoteBranchAction,
+) -> TeardownOptions {
     TeardownOptions {
         remove_worktree: !db_only,
         force,
         remote_branch,
+        pull_request,
     }
 }
 
@@ -172,14 +180,15 @@ fn run_inner(
             Ok(pc) => jobs.push(TeardownJob {
                 ws: ws.clone(),
                 pc,
-                opts: down_options(
-                    db_only,
-                    force,
-                    remote_branch::decide(
-                        github::pull_request_branch_state(pr.as_ref()),
-                        remote_policy,
-                    ),
-                ),
+                opts: {
+                    let state = github::pull_request_branch_state(pr.as_ref());
+                    down_options(
+                        db_only,
+                        force,
+                        state,
+                        remote_branch::decide(state, remote_policy),
+                    )
+                },
             }),
             Err(e) => failures.push((format!("{}/{}", ws.project, ws.branch), e.to_string())),
         }

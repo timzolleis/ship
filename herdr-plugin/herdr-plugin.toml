@@ -1,7 +1,7 @@
 id = "ship"
 name = "ship"
 version = "0.1.0"
-description = "Provision a ship workspace (database, .env, proxy route) for every Herdr worktree in a ship project"
+description = "Provision a ship workspace for every Herdr worktree in a ship project, and tear it down when the worktree is removed"
 min_herdr_version = "0.9.5"
 platforms = ["macos", "linux"]
 
@@ -9,3 +9,7 @@ platforms = ["macos", "linux"]
 [[events]]
 on = "worktree.created"
 command = ["sh", "worktree-created.sh"]
+
+[[events]]
+on = "worktree.removed"
+command = ["sh", "worktree-removed.sh"]

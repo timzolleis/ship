@@ -473,6 +473,10 @@ workspace out as three tabs:
   re-run the command to resume.
 - `terminal` is a plain shell.
 
+Removing the worktree in Herdr runs `ship down` for it in the background: route,
+database, registry entry and agent sessions go, and the branch stays if it holds
+unpushed commits. The output is in `herdr plugin log list --plugin ship`.
+
 Other repos are left alone.
 
 ```bash

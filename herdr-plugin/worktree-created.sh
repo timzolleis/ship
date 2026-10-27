@@ -1,7 +1,9 @@
 #!/bin/sh
-# worktree.created: when the repo is a ship project, run `ship create` in the
-# new worktree's pane. ship adopts the worktree Herdr made and adds the
-# database clone, .env patches, install, and proxy route. Other repos: no-op.
+# worktree.created: when the repo is a ship project, lay the new workspace out
+# as three tabs. ship adopts the worktree Herdr made; other repos: no-op.
+#   agent     the root tab, runs pi
+#   dev       provision.sh: ship create (database, .env, install, route), then ship up
+#   terminal  a plain shell
 set -eu
 
 # The pane's shell may resolve a different ship; run the one that matched.
@@ -27,6 +29,17 @@ alias=$("$ship" projects --json | jq -r '.[] | [.alias, .path] | @tsv' |
 
 quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
-"$HERDR_BIN_PATH" pane run "$HERDR_PANE_ID" \
-	"$(quote "$ship") create $(quote "$alias") $(quote "$branch") --no-editor"
-echo "ship create $alias $branch in $HERDR_PANE_ID"
+herdr=$HERDR_BIN_PATH
+worktree=$(field '.data.worktree.path')
+new_tab() {
+	"$herdr" tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$worktree" \
+		--label "$1" --no-focus | jq -r .result.root_pane.pane_id
+}
+
+"$herdr" tab rename "$HERDR_TAB_ID" agent >/dev/null
+dev=$(new_tab dev)
+new_tab terminal >/dev/null
+
+"$herdr" pane run "$dev" "sh $(quote "$HERDR_PLUGIN_ROOT/provision.sh") $(quote "$ship") $(quote "$alias") $(quote "$branch")" >/dev/null
+"$herdr" pane run "$HERDR_PANE_ID" pi >/dev/null
+echo "$alias/$branch: agent $HERDR_PANE_ID, dev $dev"

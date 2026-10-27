@@ -459,8 +459,15 @@ are still read and rewritten to the current shape on the next save.
 ### Herdr
 
 `herdr-plugin/` provisions a ship workspace for every worktree Herdr creates in a ship
-project: Herdr's new-worktree dialog makes the worktree, and the plugin runs
-`ship create` in the new workspace's pane (database, `.env`, install, proxy route).
+project. Herdr's new-worktree dialog makes the worktree; the plugin lays the new Herdr
+workspace out as three tabs:
+
+- `agent` runs pi.
+- `dev` runs `ship create` (database, `.env`, install, proxy route), shows the URL in
+  the sidebar as `$url`, then runs `ship up`. A failed create stops at the shell;
+  re-run the command to resume.
+- `terminal` is a plain shell.
+
 Other repos are left alone.
 
 ```bash

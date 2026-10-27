@@ -27,10 +27,12 @@ fn gc_teardown(pr: Option<&Pr>, remote: bool) -> TeardownOptions {
     } else {
         RemoteBranchPolicy::ClosedPullRequestsOnly
     };
+    let state = github::pull_request_branch_state(pr);
     TeardownOptions {
         remove_worktree: true,
         force: true,
-        remote_branch: remote_branch::decide(github::pull_request_branch_state(pr), policy),
+        remote_branch: remote_branch::decide(state, policy),
+        pull_request: state,
     }
 }
 

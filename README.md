@@ -230,6 +230,11 @@ local branch, remote branch (gc only), agent sessions. A step that fails is show
 warning and the registry entry stays, so the next run retries it. Steps skip what is
 already gone.
 
+The local branch is deleted only when that loses nothing: every commit on it is also on
+another branch, a tag, or a remote, or its PR is closed or merged (a squash merge leaves
+the original commits on the branch alone). Otherwise it is kept and the checklist says
+why: `kept — 2 unpushed commits`.
+
 - **`ship down`** inside a worktree tears down that one. Outside, with no arguments, it
   opens a multi-select picker over every workspace with PR status filling in as `gh`
   answers. `--db-only` drops only the database and route.

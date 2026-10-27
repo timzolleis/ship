@@ -27,7 +27,7 @@ description: Per-branch dev workspaces with the ship CLI — a git worktree, a c
 | Tear down | `ship down <project> <branch> --force` |
 | Clean up merged | `ship gc --dry-run`, then `ship gc --force` |
 
-`down` and `gc` delete worktrees, databases, and branches: run them only when the user asks. The remote branch is kept unless its PR is closed or merged; `--remote` deletes it anyway — ask first.
+`down` and `gc` delete worktrees, databases, and branches: run them only when the user asks. A local branch with commits on no other ref is kept, unless its PR is closed or merged. The remote branch is kept unless its PR is closed or merged; `--remote` deletes it anyway — ask first.
 
 ## Dev servers behind the proxy
 

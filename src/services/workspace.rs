@@ -1,6 +1,7 @@
 use crate::domain::env_patch::EnvPatchContext;
+use crate::domain::local_branch::{self, LocalBranchAction};
 use crate::domain::ports as domain_ports;
-use crate::domain::remote_branch::RemoteBranchAction;
+use crate::domain::remote_branch::{PullRequestBranchState, RemoteBranchAction};
 use crate::domain::removal::Removal;
 use crate::domain::workspace_name::derive_names;
 use crate::errors::{Error, Result};
@@ -153,6 +154,9 @@ pub struct TeardownOptions {
     pub remove_worktree: bool,
     pub force: bool,
     pub remote_branch: RemoteBranchAction,
+    /// What the local-branch step knows about the PR; `NoPullRequest` when
+    /// nobody looked it up.
+    pub pull_request: PullRequestBranchState,
 }
 
 fn runtime_label(db: &DatabaseConfig) -> String {
@@ -488,6 +492,48 @@ pub fn teardown_all_stream(
     rx
 }
 
+/// Deletes the branch only when that loses no commits. A kept branch is a
+/// finished step, not a warning: the registry entry still drops.
+fn delete_local_branch(
+    repo: &str,
+    branch: &str,
+    pull_request: PullRequestBranchState,
+) -> StepEvent<TeardownStep> {
+    // A branch that is already gone has nothing to count; delete reports it.
+    let counted = match git::branch_exists(repo, branch) {
+        Ok(false) => Ok(0),
+        Ok(true) => git::commits_only_on(repo, branch),
+        Err(e) => Err(e),
+    };
+    let only_here = match counted {
+        Ok(n) => n,
+        Err(e) => {
+            return step(
+                TeardownStep::Branch,
+                Status::Warning,
+                Some(format!(
+                    "kept \u{2014} could not check for unpushed commits: {e}"
+                )),
+            )
+        }
+    };
+    match local_branch::decide(only_here, pull_request) {
+        LocalBranchAction::KeepUnpushed(n) => step(
+            TeardownStep::Branch,
+            Status::SkippedExisting,
+            Some(format!(
+                "kept \u{2014} {n} unpushed commit{}",
+                crate::util::plural(n)
+            )),
+        ),
+        LocalBranchAction::Delete => match git::delete_branch(repo, branch) {
+            Ok(Removal::Removed) => step(TeardownStep::Branch, Status::Done, None),
+            Ok(Removal::AlreadyGone) => step(TeardownStep::Branch, Status::SkippedExisting, None),
+            Err(e) => step(TeardownStep::Branch, Status::Warning, Some(e.to_string())),
+        },
+    }
+}
+
 fn teardown_each(
     ws: &Workspace,
     pc: &ProjectConfig,
@@ -533,11 +579,7 @@ fn teardown_each(
             },
         });
 
-        emit(match git::delete_branch(&pc.path, &ws.branch) {
-            Ok(Removal::Removed) => step(TeardownStep::Branch, Status::Done, None),
-            Ok(Removal::AlreadyGone) => step(TeardownStep::Branch, Status::SkippedExisting, None),
-            Err(e) => step(TeardownStep::Branch, Status::Warning, Some(e.to_string())),
-        });
+        emit(delete_local_branch(&pc.path, &ws.branch, opts.pull_request));
 
         match opts.remote_branch {
             RemoteBranchAction::KeepNoPullRequest => emit(step(
@@ -613,6 +655,7 @@ mod tests {
             remove_worktree: true,
             force: true,
             remote_branch,
+            pull_request: PullRequestBranchState::NoPullRequest,
         }
     }
 

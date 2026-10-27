@@ -1,5 +1,5 @@
 use crate::domain::removal::Removal;
-use crate::errors::Result;
+use crate::errors::{Error, Result};
 use crate::services::shell::{self, ExecResult};
 use std::collections::HashMap;
 use std::path::Path;
@@ -34,7 +34,7 @@ fn repo_lock(repo: &str) -> MutexGuard<'static, ()> {
     lock.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn branch_exists(repo: &str, branch: &str) -> Result<bool> {
+pub fn branch_exists(repo: &str, branch: &str) -> Result<bool> {
     Ok(!run(repo, &["branch", "--list", branch])?
         .stdout
         .trim()
@@ -145,6 +145,31 @@ pub fn delete_branch(repo: &str, branch: &str) -> Result<Removal> {
         return Ok(Removal::AlreadyGone);
     }
     run(repo, &["branch", "-D", branch]).map(|_| Removal::Removed)
+}
+
+/// Commits on `branch` that no other branch, tag, or remote-tracking ref holds:
+/// exactly what deleting the branch would lose.
+pub fn commits_only_on(repo: &str, branch: &str) -> Result<usize> {
+    let local = format!("refs/heads/{branch}");
+    let r = run(
+        repo,
+        &[
+            "rev-list",
+            "--count",
+            &local,
+            "--not",
+            // --exclude takes the short name when it filters --branches.
+            &format!("--exclude={branch}"),
+            "--branches",
+            "--remotes",
+            "--tags",
+        ],
+    )?;
+    // Unreadable output must not read as "nothing to lose".
+    r.stdout.trim().parse().map_err(|_| Error::ShellExec {
+        command: format!("git rev-list --count {local}"),
+        stderr: format!("unexpected output: {}", r.stdout.trim()),
+    })
 }
 
 /// Pushes first and only asks the remote what exists when the push fails: the
@@ -284,6 +309,21 @@ mod tests {
         );
         run(&work, &["branch", "feat"]).unwrap();
         assert_eq!(delete_branch(&work, "feat").unwrap(), Removal::Removed);
+    }
+
+    #[test]
+    fn counts_only_the_commits_deleting_the_branch_would_lose() {
+        let work = repo("commits-only-on");
+        run(&work, &["switch", "-c", "feat"]).unwrap();
+        assert_eq!(commits_only_on(&work, "feat").unwrap(), 0);
+
+        run(&work, &["commit", "--allow-empty", "-m", "a"]).unwrap();
+        run(&work, &["commit", "--allow-empty", "-m", "b"]).unwrap();
+        assert_eq!(commits_only_on(&work, "feat").unwrap(), 2);
+
+        run(&work, &["push", "origin", "feat"]).unwrap();
+        run(&work, &["commit", "--allow-empty", "-m", "c"]).unwrap();
+        assert_eq!(commits_only_on(&work, "feat").unwrap(), 1);
     }
 
     // The bug this guards: branching from a stale local main. A new branch must

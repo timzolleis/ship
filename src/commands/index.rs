@@ -110,7 +110,7 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
 
             let route = existing_routes
                 .iter()
-                .find(|r| r.domain == names.proxy_domain);
+                .find(|r| r.serves(&names.proxy_domain));
             let port = match route {
                 Some(r) => r.port,
                 None => {

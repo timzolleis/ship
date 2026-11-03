@@ -84,7 +84,7 @@ pub fn derive_names(
     WorkspaceNames {
         worktree_dir_relative: resolve_pattern(&wt.dir_pattern, vars),
         db_name: database.map(|db| resolve_pattern(&db.name_pattern, vars)),
-        proxy_domain: resolve_pattern(&wt.proxy_domain_pattern, vars),
+        proxy_domain: resolve_pattern(&wt.proxy_domain_pattern, vars).to_ascii_lowercase(),
     }
 }
 
@@ -105,6 +105,13 @@ mod tests {
         let names = derive_names(&worktree(), None, "app", "tim/feat");
         assert_eq!(names.db_name, None);
         assert_eq!(names.proxy_domain, "tim-feat.app.localhost");
+    }
+
+    #[test]
+    fn proxy_domain_is_lowercase_because_caddy_ignores_host_case() {
+        let names = derive_names(&worktree(), None, "app", "EP-743");
+        assert_eq!(names.proxy_domain, "ep-743.app.localhost");
+        assert_eq!(names.worktree_dir_relative, "../app-EP-743/");
     }
 
     #[test]

@@ -77,30 +77,40 @@ pub fn get_routes() -> Result<Vec<Route>> {
     Ok(caddyfile::parse_routes(&read_caddyfile()?))
 }
 
-pub fn reload() {
-    if is_running() {
-        let _ = shell::exec(
-            "docker",
-            &[
-                "exec",
-                CONTAINER,
-                "caddy",
-                "reload",
-                "--config",
-                "/etc/caddy/Caddyfile",
-            ],
-        );
+pub fn reload() -> Result<()> {
+    if !is_running() {
+        return Ok(());
     }
+    shell::exec(
+        "docker",
+        &[
+            "exec",
+            CONTAINER,
+            "caddy",
+            "reload",
+            "--config",
+            "/etc/caddy/Caddyfile",
+        ],
+    )
+    .map(|_| ())
+    .map_err(|e| Error::ProxyReload {
+        detail: match e {
+            Error::ShellExec { stderr, .. } => stderr
+                .lines()
+                .filter(|line| !line.starts_with('{'))
+                .map(|line| line.trim_start_matches("Error: "))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => other.to_string(),
+        },
+    })
 }
 
 pub fn add_route(domain: &str, port: u16) -> Result<()> {
     {
         let _guard = caddyfile_lock();
         let content = read_caddyfile()?;
-        if caddyfile::parse_routes(&content)
-            .iter()
-            .any(|r| r.domain == domain)
-        {
+        if caddyfile::has_route(&content, domain) {
             return Err(Error::RouteExists {
                 domain: domain.to_string(),
             });
@@ -109,23 +119,19 @@ pub fn add_route(domain: &str, port: u16) -> Result<()> {
     }
     // Outside the lock: reloading re-reads the file, so a concurrent edit only
     // means one more reload, never a lost route.
-    reload();
-    Ok(())
+    reload()
 }
 
 pub fn remove_route(domain: &str) -> Result<Removal> {
     {
         let _guard = caddyfile_lock();
         let content = read_caddyfile()?;
-        if !caddyfile::parse_routes(&content)
-            .iter()
-            .any(|r| r.domain == domain)
-        {
+        if !caddyfile::has_route(&content, domain) {
             return Ok(Removal::AlreadyGone);
         }
         write_caddyfile(&caddyfile::remove_route(&content, domain))?;
     }
-    reload();
+    reload()?;
     Ok(Removal::Removed)
 }
 
@@ -196,6 +202,5 @@ pub fn edit_caddyfile() -> Result<()> {
     ensure_setup()?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
     shell::exec_interactive(&editor, &[&caddyfile_path().display().to_string()])?;
-    reload();
-    Ok(())
+    reload()
 }

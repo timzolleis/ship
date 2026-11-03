@@ -2,7 +2,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 // Pure Caddyfile route codec + port allocation. Semantics ported verbatim:
-//   - domain-block regex                   ^([a-z0-9][a-z0-9.\-]*)\s*\{
+//   - domain-block regex                   (?i)^([a-z0-9][a-z0-9.\-]*)\s*\{
 //   - reverse_proxy host.docker.internal   reverse_proxy\s+host\.docker\.internal:(\d+)
 //   - remove_route: skip the block through its matching close brace (nested
 //     blocks included), collapse blank runs (\n{3,} → \n\n), trim, then a
@@ -16,6 +16,12 @@ pub struct Route {
     pub port: u16,
 }
 
+impl Route {
+    pub fn serves(&self, domain: &str) -> bool {
+        self.domain.eq_ignore_ascii_case(domain)
+    }
+}
+
 /// Upstream connections Caddy opens per dev server. Browsers multiplex a
 /// cold dev page's hundreds of module requests over one HTTP/2 connection;
 /// without a cap Caddy dials one upstream connection per request, overflows
@@ -25,7 +31,7 @@ pub struct Route {
 pub const MAX_UPSTREAM_CONNS: u16 = 64;
 
 static DOMAIN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([a-z0-9][a-z0-9.\-]*)\s*\{").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)^([a-z0-9][a-z0-9.\-]*)\s*\{").unwrap());
 static PROXY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"reverse_proxy\s+host\.docker\.internal:(\d+)").unwrap());
 static BLANK_RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
@@ -51,7 +57,12 @@ pub fn parse_routes(content: &str) -> Vec<Route> {
     routes
 }
 
+pub fn has_route(content: &str, domain: &str) -> bool {
+    parse_routes(content).iter().any(|r| r.serves(domain))
+}
+
 pub fn add_route(content: &str, domain: &str, port: u16) -> String {
+    let domain = domain.to_ascii_lowercase();
     format!(
         "{content}\n{domain} {{\n    reverse_proxy host.docker.internal:{port} {{\n        transport http {{\n            max_conns_per_host {MAX_UPSTREAM_CONNS}\n        }}\n    }}\n}}\n"
     )
@@ -72,7 +83,10 @@ pub fn remove_route(content: &str, domain: &str) -> String {
     let mut depth = 0;
     let block_start = format!("{domain} {{");
     for line in content.split('\n') {
-        if depth == 0 && line.starts_with(&block_start) {
+        let opens_block = line
+            .get(..block_start.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(&block_start));
+        if depth == 0 && opens_block {
             depth = brace_delta(line);
             continue;
         }
@@ -127,5 +141,27 @@ mod tests {
             .map(|r| r.domain)
             .collect();
         assert_eq!(domains, ["b.localhost"]);
+    }
+
+    #[test]
+    fn added_domain_is_lowercased_and_found_in_any_case() {
+        let content = add_route(FLAT, "EP-1.x.localhost", 5175);
+        assert!(content.contains("ep-1.x.localhost {"));
+        assert!(has_route(&content, "EP-1.x.localhost"));
+        assert!(has_route(&content, "ep-1.x.localhost"));
+    }
+
+    #[test]
+    fn uppercase_blocks_parse_and_remove() {
+        let legacy = format!(
+            "{FLAT}\nEP-1.x.localhost {{\n    reverse_proxy host.docker.internal:5175\n}}\n\nEP-1.x.localhost {{\n    reverse_proxy host.docker.internal:5175\n}}\n"
+        );
+        assert!(has_route(&legacy, "ep-1.x.localhost"));
+        let removed = remove_route(&legacy, "ep-1.x.localhost");
+        let domains: Vec<_> = parse_routes(&removed)
+            .into_iter()
+            .map(|r| r.domain)
+            .collect();
+        assert_eq!(domains, ["a.localhost"]);
     }
 }

@@ -96,7 +96,10 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
     }
 
     // Ensure route exists.
-    let _ = proxy::add_route(&target.domain, target.port);
+    match proxy::add_route(&target.domain, target.port) {
+        Ok(()) | Err(Error::RouteExists { .. }) => {}
+        Err(e) => return Err(e),
+    }
 
     println!(
         "  {} {} {} localhost:{}",

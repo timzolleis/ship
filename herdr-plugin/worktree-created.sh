@@ -14,8 +14,6 @@ repo_root=$(field '.data.workspace.worktree.repo_root')
 [ -n "$branch" ] && [ -n "$repo_root" ] || exit 0 # detached HEAD
 root=$(resolve "$repo_root") || exit 0
 
-# A claim means whoever created the worktree starts its own agent in the root
-# pane (the herdr-subagents pi extension does). Consumed in every repo.
 claim="$HERDR_PLUGIN_CONFIG_DIR/claimed/$(printf '%s\n%s' "$root" "$branch" | shasum | cut -c1-40)"
 claimed=false
 if [ -e "$claim" ]; then

@@ -58,6 +58,9 @@ pub enum Error {
     #[error("Route '{domain}' already exists.")]
     RouteExists { domain: String },
 
+    #[error("Caddy rejected the Caddyfile, so no route change is live: {detail}\nFix it with 'ship proxy edit'.")]
+    ProxyReload { detail: String },
+
     #[error("No CA cert yet. Start the proxy and make a request first.")]
     CertNotFound,
 

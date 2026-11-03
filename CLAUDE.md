@@ -97,7 +97,7 @@ skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzollei
 
 ## Error Variants (src/errors.rs)
 
-`InvalidPortName`, `UnknownPort`, `InvalidPortValue`, `ProjectNotFound`, `ParseConfig`, `ConfigOutdated`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `NoProjects`, `NotInWorkspace`, `NotInProject`, `UnknownTarget`, `NeedsInput`, `NoDatabase`, `Prompt`.
+`InvalidPortName`, `UnknownPort`, `InvalidPortValue`, `ProjectNotFound`, `ParseConfig`, `ConfigOutdated`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `ProxyReload`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `NoProjects`, `NotInWorkspace`, `NotInProject`, `UnknownTarget`, `NeedsInput`, `NoDatabase`, `Prompt`.
 
 ## Config Storage
 

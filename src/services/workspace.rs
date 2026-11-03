@@ -219,7 +219,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         ping_ok && db.is_some_and(|(d, name)| database::exists(DbTarget::from(d), name));
 
     let routes = proxy::get_routes().unwrap_or_default();
-    let existing_route = routes.iter().find(|r| r.domain == names.proxy_domain);
+    let existing_route = routes.iter().find(|r| r.serves(&names.proxy_domain));
 
     // 3. Port precedence: registered ws → existing route → next free. Named
     // ports keep the registered ones and take free ports for the rest. A

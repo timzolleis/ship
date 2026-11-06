@@ -102,6 +102,9 @@ pub enum Error {
     #[error("Project '{alias}' has no database. Add one under \"database\" in config.json (ship config show {alias}).")]
     NoDatabase { alias: String },
 
+    #[error("Workspace '{branch}' is bare: it has no port or route. Run: ship create {project} {branch}")]
+    BareWorkspace { project: String, branch: String },
+
     #[error("{0}")]
     Prompt(String),
 }

@@ -9,7 +9,9 @@ use std::sync::LazyLock;
 //   - Keys absent from `vars` are preserved verbatim.
 //   - Surrounding single/double quotes are stripped from the value first.
 //   - database_url → swap the trailing /<segment> for /<db_name>; untouched
-//     when the project has no database (no name to swap in).
+//     when the project has no database (no name to swap in); emptied for a
+//     bare workspace, so nothing in it reaches the source database.
+//     An emptied value is written as `KEY=`.
 //   - proxy_url    → swap the http(s)://<origin> for https://<proxy_domain>.
 //   - dev_url      → http://localhost:<port><configured path suffix>.
 //   - port         → <port>.
@@ -19,8 +21,18 @@ use std::sync::LazyLock;
 //     rejects that config before anything runs).
 //   - A change is recorded (key/from/to) ONLY when the value actually changed.
 
+/// What a `database_url` var points at in the new workspace.
+pub enum DatabaseTarget {
+    /// The project has no database: the value stays.
+    Unchanged,
+    /// The workspace's own clone.
+    Named(String),
+    /// A bare workspace has no database of its own.
+    Empty,
+}
+
 pub struct EnvPatchContext {
-    pub db_name: Option<String>,
+    pub database: DatabaseTarget,
     pub proxy_domain: String,
     pub port: u16,
     /// The workspace's named ports.
@@ -85,11 +97,12 @@ pub fn patch_env_content(
 
         let value = strip_quotes(raw_value).to_string();
         let new_value = match var_config.var_type {
-            EnvVarType::DatabaseUrl => match &ctx.db_name {
-                Some(db_name) => DB_TAIL_RE
+            EnvVarType::DatabaseUrl => match &ctx.database {
+                DatabaseTarget::Named(db_name) => DB_TAIL_RE
                     .replace(&value, NoExpand(&format!("/{db_name}")))
                     .into_owned(),
-                None => value.clone(),
+                DatabaseTarget::Unchanged => value.clone(),
+                DatabaseTarget::Empty => String::new(),
             },
             EnvVarType::ProxyUrl => ORIGIN_RE
                 .replace(&value, NoExpand(&format!("https://{}", ctx.proxy_domain)))
@@ -131,7 +144,7 @@ mod tests {
 
     fn ctx() -> EnvPatchContext {
         EnvPatchContext {
-            db_name: Some("znb_tim_feature".to_string()),
+            database: DatabaseTarget::Named("znb_tim_feature".to_string()),
             proxy_domain: "tim-feature.znb.localhost".to_string(),
             port: 3210,
             ports: [("api".to_string(), 3211)].into_iter().collect(),
@@ -178,6 +191,20 @@ mod tests {
             "DATABASE_URL=file:../../development/sqlite-data/database.db"
         );
         assert!(console.changes.is_empty());
+    }
+
+    #[test]
+    fn bare_workspace_empties_the_database_url_only() {
+        let out = patch_env_content(
+            "DATABASE_URL=postgresql://postgres:postgres@localhost:5433/znb\nSECRET=abc",
+            &vars(&[("DATABASE_URL", EnvVarType::DatabaseUrl)]),
+            &EnvPatchContext {
+                database: DatabaseTarget::Empty,
+                ..ctx()
+            },
+        );
+        assert_eq!(out.content, "DATABASE_URL=\nSECRET=abc");
+        assert_eq!(out.changes.len(), 1);
     }
 
     #[test]

@@ -54,6 +54,9 @@ enum Cmd {
         /// Never open the editor
         #[arg(long, overrides_with = "editor")]
         no_editor: bool,
+        /// Worktree, copied files, .env files and install only: no database, port or route. A later `ship create` without --bare adds them
+        #[arg(long)]
+        bare: bool,
     },
     /// Tear down a workspace: route, database, worktree, local branch, and the remote branch once its PR is closed or merged
     Down {
@@ -167,7 +170,7 @@ fn help_text() -> String {
     {config_sessions} [on|off]   Delete agent sessions on teardown
 
   {lifecycle}
-    {create} [project] [branch] [--no-editor]   Create or resume a workspace
+    {create} [project] [branch] [--no-editor] [--bare]   Create or resume a workspace
     {down}   [project] [branch] [--remote]   Tear down a workspace
     {ls}     [project] [--json]     List active workspaces
 
@@ -272,13 +275,14 @@ fn dispatch(cmd: Cmd) -> ExitCode {
             base,
             editor,
             no_editor,
+            bare,
         } => {
             let editor = match (editor, no_editor) {
                 (true, _) => Some(true),
                 (_, true) => Some(false),
                 _ => None,
             };
-            commands::create::run(project, branch, base, editor)
+            commands::create::run(project, branch, base, editor, bare)
         }
         Cmd::Down {
             project,

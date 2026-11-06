@@ -33,6 +33,12 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
     let workspaces = config::load_workspaces()?;
 
     let target = if let Some(w) = locate_workspace(&workspaces, cwd, None) {
+        if w.bare {
+            return Err(Error::BareWorkspace {
+                project: w.project.clone(),
+                branch: w.branch.clone(),
+            });
+        }
         let project_config = config::get_project(&w.project)?;
         ports::check(&project_config)?;
         // A port named after the workspace was created gets its value now.

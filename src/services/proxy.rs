@@ -41,11 +41,7 @@ fn caddyfile_lock() -> MutexGuard<'static, ()> {
 }
 
 fn write_caddyfile(content: &str) -> Result<()> {
-    let path = caddyfile_path();
-    fs::write(&path, content).map_err(|e| Error::WriteFile {
-        path: path.display().to_string(),
-        detail: e.to_string(),
-    })
+    config::write_atomic(&caddyfile_path(), content)
 }
 
 pub fn ensure_setup() -> Result<()> {

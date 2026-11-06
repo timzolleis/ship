@@ -54,7 +54,7 @@ fn detect() -> String {
 
 /// Never fails: prints progress and persists the detected editor on success.
 pub fn open(path: &str) {
-    let mut ship_config = config::load_config().unwrap_or_default();
+    let ship_config = config::load_config().unwrap_or_default();
 
     if let Some(saved) = ship_config.editor.clone() {
         println!("  Opening in {}...", bold(&saved));
@@ -68,8 +68,7 @@ pub fn open(path: &str) {
     println!("  Opening in {}...", bold(&editor));
 
     if open_with(&editor, path) {
-        ship_config.editor = Some(editor);
-        let _ = config::save_config(&ship_config);
+        let _ = config::update_config(|c| c.editor = Some(editor));
     } else {
         println!("  {}", dim("No editor found. Set $EDITOR or $VISUAL."));
     }

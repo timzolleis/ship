@@ -64,6 +64,17 @@ pub fn exec_interactive(command: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Runs `sh -c <script>` in `cwd` with output captured; true when it exits 0.
+/// For an attempt that has a fallback, so its failure output stays quiet.
+pub fn succeeds_in_dir(cwd: &str, script: &str, env: &[(&str, &str)]) -> bool {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", script]).current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output().is_ok_and(|o| o.status.success())
+}
+
 /// Runs `sh -c <script>` in `cwd` with inherited stdio. Nonzero exit is not an
 /// error — see exec_interactive.
 pub fn exec_in_dir(cwd: &str, script: &str, env: &[(&str, &str)]) -> Result<()> {

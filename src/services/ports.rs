@@ -15,7 +15,9 @@ pub fn used() -> Result<HashSet<u16>> {
         used.extend(project.ports.values());
     }
     for ws in config::load_workspaces()? {
-        used.insert(ws.port);
+        if !ws.bare {
+            used.insert(ws.port);
+        }
         used.extend(ws.ports.values());
     }
     Ok(used)

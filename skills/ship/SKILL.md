@@ -20,6 +20,8 @@ description: Per-branch dev workspaces with the ship CLI — a git worktree, a c
 | Task | Command |
 |---|---|
 | Create or resume | `ship create <project> <branch> [--base <branch>] --no-editor`. A branch already checked out in another worktree is adopted at its path. |
+| Create cheap (code only) | `ship create <project> <branch> --bare --no-editor`: worktree, copied files, `.env` as is except `database_url` vars emptied (`DATABASE_URL=`: anything that needs the database fails until the upgrade), install. No database, port, route; `ship up`, `reset` and `db` do not work on it. `ship create <project> <branch>` later upgrades it. `ls --json` shows `"bare": true`, `port` 0. |
+| Worktree location | `ship config worktree-root <path>` sends new worktrees to `<path>/<repo>/<branch_slug>`; `--clear` restores each project's `dirPattern`. |
 | Find one | `ship ls <project> --json` → `path`, `proxyDomain`, `port`, `ports`, `dbName` |
 | Dev server | `ship up` in the workspace directory. It blocks until the server exits: run it in the background. ship sets `PORT`, plus `<NAME>_PORT` per named port. |
 | Re-clone the database | `ship reset` in the workspace directory |

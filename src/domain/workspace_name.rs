@@ -88,10 +88,33 @@ pub fn derive_names(
     }
 }
 
+/// Where a branch's worktree goes when the global `worktreeRoot` is set:
+/// `<root>/<repo>/<branch_slug>`, `repo` being the main checkout's directory name.
+pub fn worktree_in_root(root: &str, repo_path: &str, branch: &str) -> String {
+    let repo = repo_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    format!(
+        "{}/{repo}/{}",
+        root.trim_end_matches('/'),
+        to_branch_slug(branch)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::ExecutionRuntime;
+
+    #[test]
+    fn root_puts_worktrees_under_repo_name() {
+        assert_eq!(
+            worktree_in_root("/h/wt/", "/code/prostats", "feat/x"),
+            "/h/wt/prostats/feat-x"
+        );
+    }
 
     fn worktree() -> WorktreeConfig {
         WorktreeConfig {

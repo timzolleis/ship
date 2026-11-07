@@ -87,11 +87,13 @@ Project setup
   ship projects [--json]                List registered projects
   ship config show [alias] [--all] [--json]  Show env handling and copy paths with file line numbers
   ship config sessions [on|off]         Delete agent transcripts on teardown (default on)
+  ship config worktree-root [path|--clear]   Put new worktrees at <root>/<repo>/<branch_slug>
 
 Workspace lifecycle
   ship create [project] [branch]        Create or resume a workspace
   ship create ep feat --base develop    Branch off a specific base
   ship create ep feat --no-editor       Don't open the editor (--editor forces it)
+  ship create ep feat --bare            Worktree + copied files + .env (database URL empty) + install; no database, port or route
   ship down [project] [branch]          Tear down (cwd workspace, or a picker)
   ship down --force                     Skip confirmation and dirty-worktree checks
   ship down --db-only                   Drop the database and route, keep the worktree
@@ -194,7 +196,27 @@ ship create ep tim/ep-241            # explicit
 ship create                          # pick the project, type the branch
 ship create ep tim/ep-241 --base develop
 ship create ep tim/ep-241 --no-editor
+ship create ep tim/ep-241 --bare     # cheap: worktree and install only
 ```
+
+`--bare` makes a tier-0 workspace for an agent that only reads and edits code: the
+worktree, the `copy` paths, the `.env` files copied as they are except `database_url`
+vars, which are emptied (`DATABASE_URL=`) so migrations and tests can't reach the source
+database, and the `install` scope. `pnpm install` commands run with
+`--offline --frozen-lockfile` first and fall back to the command as written (about 5 s
+with a warm store). The workspace is registered with `bare: true`, so `ls`, `down` and
+`gc` see it; `ls` shows `bare` in the PORT column and `up` refuses it. Running
+`ship create` on it without `--bare` upgrades it: database, port, route, patched `.env`.
+Like a normal create, it is idempotent and resumes.
+
+**Worktree root.** `ship config worktree-root ~/.herdr/worktrees` sends every new
+worktree to `<root>/<repo>/<branch_slug>` (`<repo>` is the main checkout's directory
+name) instead of the project's `dirPattern`. `--clear` undoes it. A branch already
+checked out elsewhere is still adopted where it is.
+
+**Concurrency.** Config files are written to a temp file and renamed, and
+`config.json` / `workspaces.json` changes run under a lock file
+(`~/.config/ship/.lock`), so parallel `ship create`s each keep their entry.
 
 What happens, in order:
 

@@ -1,7 +1,7 @@
 use crate::commands::teardown as teardown_ui;
 use crate::domain::db_orphans::{self, OrphanQuery};
 use crate::domain::remote_branch::{self, RemoteBranchPolicy};
-use crate::domain::workspace_name::resolve_pattern;
+use crate::domain::workspace_name::{resolve_pattern, worktree_in_root};
 use crate::errors::{Error, Result};
 use crate::fmt::{bold, dim, green, red, yellow};
 use crate::prompt::{self, Unattended};
@@ -102,16 +102,30 @@ fn worktree_prefix(alias: &str, pc: &ProjectConfig) -> WorktreePrefix {
     WorktreePrefix::new(&resolve_path(&pc.path, head))
 }
 
+/// The prefix of worktrees made under `worktreeRoot`: `<root>/<repo>/`.
+fn root_prefix(root: &str, pc: &ProjectConfig) -> WorktreePrefix {
+    WorktreePrefix::new(&worktree_in_root(root, &pc.path, ""))
+}
+
 fn session_row(s: &SessionDir) -> Row<SessionDir> {
     Row::new(s.clone(), [dim(s.harness), bold(&s.name)])
 }
 
 fn sweep_sessions(force: bool, dry_run: bool) -> Result<ExitCode> {
-    let projects = config::load_config()?.projects;
-    let prefixes: Vec<WorktreePrefix> = projects
+    let ship_config = config::load_config()?;
+    let mut prefixes: Vec<WorktreePrefix> = ship_config
+        .projects
         .iter()
         .map(|(alias, pc)| worktree_prefix(alias, pc))
         .collect();
+    if let Some(root) = &ship_config.worktree_root {
+        prefixes.extend(
+            ship_config
+                .projects
+                .values()
+                .map(|pc| root_prefix(root, pc)),
+        );
+    }
     let orphans = agent::orphans(&prefixes);
 
     println!();

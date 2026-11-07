@@ -168,6 +168,7 @@ fn run_inner(project_opt: Option<String>, all: bool, dry_run: bool) -> Result<()
                 db_name: names.db_name.clone(),
                 proxy_domain: names.proxy_domain.clone(),
                 created: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                bare: false,
             })?;
             println!("      {} indexed", green("✓"));
             total_indexed += 1;

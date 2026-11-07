@@ -302,6 +302,10 @@ pub struct ShipConfig {
     /// Delete agent transcripts with the worktree. None = on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delete_agent_sessions: Option<bool>,
+    /// New worktrees go to `<root>/<repo>/<branch_slug>` instead of each
+    /// project's `dirPattern`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<String>,
     #[serde(default)]
     pub projects: IndexMap<String, ProjectConfig>,
 }
@@ -325,6 +329,10 @@ pub struct Workspace {
     pub db_name: Option<String>,
     pub proxy_domain: String,
     pub created: String,
+    /// Worktree only: no database, port or route (`ship create --bare`).
+    /// `port` is 0 and `proxy_domain` empty until `ship create` upgrades it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bare: bool,
 }
 
 impl Workspace {

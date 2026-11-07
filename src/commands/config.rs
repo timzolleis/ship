@@ -25,6 +25,14 @@ pub enum ConfigCmd {
         /// Omit to print the current setting
         state: Option<Toggle>,
     },
+    /// Put new worktrees at <root>/<repo>/<branch> instead of each project's dirPattern
+    WorktreeRoot {
+        /// Directory to use; omit to print the current setting
+        path: Option<String>,
+        /// Go back to each project's dirPattern
+        #[arg(long, conflicts_with = "path")]
+        clear: bool,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, PartialEq)]
@@ -116,6 +124,7 @@ pub fn run(cmd: Option<ConfigCmd>) -> ExitCode {
         }) => show_json(alias, all),
         Some(ConfigCmd::Show { alias, all, .. }) => show(alias, all),
         Some(ConfigCmd::Sessions { state }) => sessions(state),
+        Some(ConfigCmd::WorktreeRoot { path, clear }) => worktree_root(path, clear),
         None => show(None, false),
     })
 }
@@ -124,11 +133,10 @@ pub fn run(cmd: Option<ConfigCmd>) -> ExitCode {
 /// stands; writing prints what it now does, since the effect is invisible
 /// until the next teardown.
 fn sessions(state: Option<Toggle>) -> Result<()> {
-    let mut config = config::load_config()?;
     if let Some(state) = state {
-        config.delete_agent_sessions = Some(state == Toggle::On);
-        config::save_config(&config)?;
+        config::update_config(|c| c.delete_agent_sessions = Some(state == Toggle::On))?;
     }
+    let config = config::load_config()?;
 
     println!();
     if config.delete_agent_sessions.unwrap_or(true) {
@@ -139,6 +147,37 @@ fn sessions(state: Option<Toggle>) -> Result<()> {
     } else {
         println!("  {} Agent sessions are kept.", yellow("·"));
         println!("  {}", dim("Clear the leftovers with: ship gc --sessions"));
+    }
+    println!();
+    Ok(())
+}
+
+/// Read or write the worktree root. A leading `~` and a relative path resolve
+/// now, so the stored value is absolute.
+fn worktree_root(path: Option<String>, clear: bool) -> Result<()> {
+    if clear {
+        config::update_config(|c| c.worktree_root = None)?;
+    } else if let Some(path) = path {
+        let expanded = match path.strip_prefix("~/") {
+            Some(rest) => format!("{}/{rest}", config::home_dir()),
+            None if path == "~" => config::home_dir(),
+            None => path,
+        };
+        let root = crate::util::resolve_path(&cwd_string(), &expanded);
+        config::update_config(|c| c.worktree_root = Some(root))?;
+    }
+
+    println!();
+    match config::load_config()?.worktree_root {
+        Some(root) => println!(
+            "  {} New worktrees go to {}",
+            green("✓"),
+            blue(format!("{root}/<repo>/<branch>"))
+        ),
+        None => println!(
+            "  {} Each project's dirPattern decides where worktrees go.",
+            yellow("·")
+        ),
     }
     println!();
     Ok(())

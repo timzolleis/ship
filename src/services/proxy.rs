@@ -40,6 +40,10 @@ fn caddyfile_lock() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// In place, never by rename: Docker bind-mounts this one file into the proxy
+/// container by inode, and a renamed-over file leaves the container reading the
+/// deleted one (`open /etc/caddy/Caddyfile: no such file or directory`).
+/// `caddyfile_lock` keeps writers from interleaving.
 fn write_caddyfile(content: &str) -> Result<()> {
     let path = caddyfile_path();
     fs::write(&path, content).map_err(|e| Error::WriteFile {

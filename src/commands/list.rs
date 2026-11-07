@@ -41,6 +41,9 @@ pub fn cells(ws: &Workspace) -> [String; 3] {
 
 /// The routed port, then each named one: `5181  api 5182`.
 fn port_cell(ws: &Workspace) -> String {
+    if ws.bare {
+        return dim("bare");
+    }
     std::iter::once(blue(ws.port))
         .chain(
             ws.ports

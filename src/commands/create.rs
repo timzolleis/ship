@@ -124,6 +124,9 @@ fn render_event(e: &StepEvent<ProvisionStep>, ctx: &RenderContext) -> Vec<String
                 Status::Done => vec![ok_line("Local files", &dim(detail))],
             }
         }
+        ProvisionStep::Env if e.status == Status::Done && e.detail.is_none() => {
+            vec![ok_line("Env files", "copied as is")]
+        }
         ProvisionStep::Install => vec![ok_line("Dependencies", "installed")],
         ProvisionStep::Db => vec![ok_line("Database setup", "applied")],
         ProvisionStep::ProxyRoute => {
@@ -184,8 +187,9 @@ pub fn run(
     branch: Option<String>,
     base: Option<String>,
     editor: Option<bool>,
+    bare: bool,
 ) -> ExitCode {
-    match run_inner(project, branch, base, editor) {
+    match run_inner(project, branch, base, editor, bare) {
         Err(e @ Error::DatabaseUnreachable { .. }) => {
             eprintln!();
             eprintln!("  {} {}", red("✗"), e);
@@ -202,6 +206,7 @@ fn run_inner(
     branch_opt: Option<String>,
     base: Option<String>,
     editor_flag: Option<bool>,
+    bare: bool,
 ) -> Result<()> {
     // 1. Resolve project (prompt if not specified).
     let project = match project_opt {
@@ -247,6 +252,7 @@ fn run_inner(
         project_config: &project_config,
         branch: &branch,
         base_branch: base.as_deref(),
+        bare,
     })?;
 
     let ctx = RenderContext {
@@ -271,13 +277,23 @@ fn run_inner(
     if outcome.already_complete {
         let w = &outcome.workspace;
         println!("  Already exists: {} in {}", bold(&w.branch), dim(&w.path));
-        println!(
-            "  Proxy: {} → :{}",
-            blue(format!("https://{}", w.proxy_domain)),
-            w.port
-        );
-        for (name, port) in &w.ports {
-            println!("  {}: :{port}", domain_ports::env_name(name));
+        if w.bare {
+            println!(
+                "  {}",
+                dim(format!(
+                    "Bare: no database or route. Add them with: ship create {} {}",
+                    w.project, w.branch
+                ))
+            );
+        } else {
+            println!(
+                "  Proxy: {} → :{}",
+                blue(format!("https://{}", w.proxy_domain)),
+                w.port
+            );
+            for (name, port) in &w.ports {
+                println!("  {}: :{port}", domain_ports::env_name(name));
+            }
         }
         println!();
         // A resumed workspace always asks; the stored preference is for new ones.
@@ -307,7 +323,7 @@ fn run_inner(
     // 4. Editor: the flag wins; otherwise only a terminal session opens it
     // (prompt once, persist the answer). Unattended runs store nothing.
     println!();
-    let mut ship_config = config::load_config()?;
+    let ship_config = config::load_config()?;
     let launch =
         editor_launch::decide(editor_flag, ship_config.auto_open_editor, ui::interactive());
     let should_open = match launch {
@@ -315,8 +331,7 @@ fn run_inner(
         EditorLaunch::Skip => false,
         EditorLaunch::Ask => {
             let v = prompt::confirm("Open workspace in editor?", true, Unattended::Answer(false))?;
-            ship_config.auto_open_editor = Some(v);
-            config::save_config(&ship_config)?;
+            config::update_config(|c| c.auto_open_editor = Some(v))?;
             v
         }
     };

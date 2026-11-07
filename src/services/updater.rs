@@ -36,10 +36,7 @@ pub fn write_cache(cache: &UpdateCache) -> Result<()> {
     let json = serde_json::to_string_pretty(cache).map_err(|e| Error::EncodeConfig {
         detail: e.to_string(),
     })?;
-    fs::write(cache_path(), json + "\n").map_err(|e| Error::WriteFile {
-        path: cache_path().display().to_string(),
-        detail: e.to_string(),
-    })
+    config::write_atomic(&cache_path(), &(json + "\n"))
 }
 
 pub fn is_cache_stale(cache: &UpdateCache) -> bool {

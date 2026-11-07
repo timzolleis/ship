@@ -1,11 +1,13 @@
-use crate::domain::env_patch::EnvPatchContext;
+use crate::domain::env_patch::{DatabaseTarget, EnvPatchContext};
 use crate::domain::local_branch::{self, LocalBranchAction};
 use crate::domain::ports as domain_ports;
 use crate::domain::remote_branch::{PullRequestBranchState, RemoteBranchAction};
 use crate::domain::removal::Removal;
-use crate::domain::workspace_name::derive_names;
+use crate::domain::workspace_name::{derive_names, worktree_in_root};
 use crate::errors::{Error, Result};
-use crate::schema::{DatabaseConfig, ExecutionRuntime, ProjectConfig, Workspace};
+use crate::schema::{
+    DatabaseConfig, EnvConfig, EnvVarType, ExecutionRuntime, ProjectConfig, Workspace,
+};
 use crate::services::copy::{self, CopyOutcome, CopyStatus};
 use crate::services::database::{self, DbTarget};
 use crate::services::env::{self, PatchResult};
@@ -135,11 +137,30 @@ fn run_scope(dir: &str, cmds: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `pnpm install` from the local store first: with a warm store and a
+/// lockfile that is ~5 s, and a miss falls back to the command as written.
+fn run_install(dir: &str, cmds: &[String]) -> Result<()> {
+    for cmd in cmds {
+        let offline = cmd.trim_start().starts_with("pnpm install")
+            && shell::succeeds_in_dir(
+                dir,
+                &format!("{cmd} --offline --frozen-lockfile"),
+                NON_INTERACTIVE_ENV,
+            );
+        if !offline {
+            shell::exec_in_dir(dir, cmd, NON_INTERACTIVE_ENV)?;
+        }
+    }
+    Ok(())
+}
+
 pub struct ProvisionInput<'a> {
     pub project_alias: &'a str,
     pub project_config: &'a ProjectConfig,
     pub branch: &'a str,
     pub base_branch: Option<&'a str>,
+    /// Worktree, copied files and install only: no database, port or route.
+    pub bare: bool,
 }
 
 pub struct ProvisionOutcome {
@@ -200,11 +221,15 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     // checkout, else the pattern dir against pc.path.
     let names = derive_names(&pc.worktree, pc.database.as_ref(), alias, branch);
     let worktrees = git::worktree_list(&pc.path).unwrap_or_default();
+    let worktree_dir_relative = match config::load_config()?.worktree_root {
+        Some(root) => worktree_in_root(&root, &pc.path, branch),
+        None => names.worktree_dir_relative.clone(),
+    };
     let worktree_dir = worktree_dir_for(
         &worktrees,
         &pc.path,
         branch,
-        resolve_path(&pc.path, &names.worktree_dir_relative),
+        resolve_path(&pc.path, &worktree_dir_relative),
     );
     // The project's database and this workspace's name in it; None when the
     // project has no database.
@@ -213,6 +238,10 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     // 2. Probe each resource defensively (probe failures = absent).
     let existing_ws = config::find_workspace(alias, branch).unwrap_or(None);
     let worktree_exists = worktrees.iter().any(|w| w.path == worktree_dir);
+
+    if input.bare {
+        return provision_bare(input, &worktree_dir, worktree_exists, existing_ws);
+    }
 
     let ping_ok = db.is_none_or(|(d, _)| database::ping(DbTarget::from(d)));
     let db_exists =
@@ -229,6 +258,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     let port = match existing_ws
         .as_ref()
         .map(|w| w.port)
+        .filter(|&port| port != 0)
         .or(existing_route.map(|r| r.port))
     {
         Some(port) => port,
@@ -248,7 +278,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     // counts as present.
     let all_present = existing_ws
         .as_ref()
-        .is_some_and(|w| w.ports == named_ports && w.path == worktree_dir)
+        .is_some_and(|w| !w.bare && w.ports == named_ports && w.path == worktree_dir)
         && worktree_exists
         && (db.is_none() || db_exists)
         && existing_route.is_some();
@@ -262,6 +292,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
             db_name: names.db_name.clone(),
             proxy_domain: names.proxy_domain.clone(),
             created: String::new(),
+            bare: false,
         });
         return Ok(ProvisionOutcome {
             events,
@@ -293,11 +324,16 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
     let was_registered = existing_ws.is_some();
     let workspace = match existing_ws {
         // A port named since the workspace registered gets its value now. A
-        // checkout adopted after a failed run moves the entry to its path.
-        Some(ws) if ws.ports != named_ports || ws.path != worktree_dir => {
+        // checkout adopted after a failed run moves the entry to its path. A
+        // bare workspace gains its port, route and database name.
+        Some(ws) if ws.bare || ws.ports != named_ports || ws.path != worktree_dir => {
             let ws = Workspace {
+                port,
                 ports: named_ports,
                 path: worktree_dir.clone(),
+                db_name: names.db_name.clone(),
+                proxy_domain: names.proxy_domain.clone(),
+                bare: false,
                 ..ws
             };
             config::update_workspace(&ws)?;
@@ -314,6 +350,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
                 db_name: names.db_name.clone(),
                 proxy_domain: names.proxy_domain.clone(),
                 created: today_iso(),
+                bare: false,
             };
             config::add_workspace(ws.clone())?;
             ws
@@ -372,7 +409,10 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         &worktree_dir,
         &pc.env,
         &EnvPatchContext {
-            db_name: names.db_name.clone(),
+            database: names
+                .db_name
+                .clone()
+                .map_or(DatabaseTarget::Unchanged, DatabaseTarget::Named),
             proxy_domain: names.proxy_domain.clone(),
             port,
             ports: workspace.ports.clone(),
@@ -394,7 +434,7 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
             s.spawn(move || database::clone_db(DbTarget::from(d), &d.source, name))
         });
         let installed = (!pc.commands.install.is_empty())
-            .then(|| run_scope(&worktree_dir, &pc.commands.install));
+            .then(|| run_install(&worktree_dir, &pc.commands.install));
         let cloned = clone.map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)));
         (cloned, installed)
     });
@@ -442,6 +482,125 @@ pub fn provision(input: &ProvisionInput) -> Result<ProvisionOutcome> {
         workspace,
         already_complete: false,
         env_changes,
+    })
+}
+
+/// `ship create --bare`: the worktree, the project's copied files and .env
+/// files, and the install scope. The .env files arrive as in the source, except
+/// `database_url` vars, which are emptied: a bare workspace has no database, and
+/// the source's would take its migrations and test writes.
+/// Registered with `bare: true` so `ls`, `down` and `gc` see it.
+fn provision_bare(
+    input: &ProvisionInput,
+    worktree_dir: &str,
+    worktree_exists: bool,
+    existing_ws: Option<Workspace>,
+) -> Result<ProvisionOutcome> {
+    let pc = input.project_config;
+    let mut events = Vec::new();
+
+    // Present already — bare or full — is complete. A full workspace is never
+    // downgraded.
+    if let Some(ws) = existing_ws.as_ref().filter(|_| worktree_exists) {
+        return Ok(ProvisionOutcome {
+            events,
+            workspace: ws.clone(),
+            already_complete: true,
+            env_changes: vec![],
+        });
+    }
+    if existing_ws.is_some() || worktree_exists {
+        events.push(step(
+            ProvisionStep::Probe,
+            Status::Done,
+            Some("resuming partial setup".to_string()),
+        ));
+    }
+
+    let workspace = match existing_ws {
+        Some(ws) if ws.path == worktree_dir => ws,
+        existing => {
+            let ws = Workspace {
+                project: input.project_alias.to_string(),
+                branch: input.branch.to_string(),
+                path: worktree_dir.to_string(),
+                port: 0,
+                ports: Default::default(),
+                db_name: None,
+                proxy_domain: String::new(),
+                created: existing.map_or_else(today_iso, |w| w.created),
+                bare: true,
+            };
+            config::add_workspace(ws.clone())?;
+            ws
+        }
+    };
+
+    if worktree_exists {
+        events.push(step(ProvisionStep::SyncBase, Status::SkippedExisting, None));
+        events.push(step(ProvisionStep::Worktree, Status::SkippedExisting, None));
+    } else {
+        let fetched = git::fetch(&pc.path);
+        let base_ref = git::resolve_base(&pc.path, input.base_branch);
+        events.push(match fetched {
+            Ok(()) => step(
+                ProvisionStep::SyncBase,
+                Status::Done,
+                Some(base_ref.clone()),
+            ),
+            Err(e) => step(
+                ProvisionStep::SyncBase,
+                Status::Warning,
+                Some(format!("fetch failed, branching from {base_ref}: {e}")),
+            ),
+        });
+        git::worktree_add(&pc.path, worktree_dir, input.branch, Some(&base_ref))?;
+        events.push(step(ProvisionStep::Worktree, Status::Done, None));
+    }
+
+    if !pc.copy.is_empty() {
+        let outcomes = copy::copy_paths(&pc.path, worktree_dir, &pc.copy)?;
+        events.push(step(
+            ProvisionStep::Copy,
+            copy_status(&outcomes),
+            Some(copy_detail(&outcomes)),
+        ));
+    }
+
+    let databases_only = EnvConfig {
+        files: pc
+            .env
+            .files
+            .iter()
+            .map(|(file, vars)| {
+                let database_vars = vars
+                    .iter()
+                    .filter(|(_, var)| var.var_type == EnvVarType::DatabaseUrl)
+                    .map(|(key, var)| (key.clone(), var.clone()))
+                    .collect();
+                (file.clone(), database_vars)
+            })
+            .collect(),
+    };
+    let ctx = EnvPatchContext {
+        database: DatabaseTarget::Empty,
+        proxy_domain: String::new(),
+        port: 0,
+        ports: Default::default(),
+    };
+    env::patch_env_files(&pc.path, worktree_dir, &databases_only, &ctx)?;
+    events.push(step(ProvisionStep::Env, Status::Done, None));
+
+    if !pc.commands.install.is_empty() {
+        run_install(worktree_dir, &pc.commands.install)?;
+        events.push(step(ProvisionStep::Install, Status::Done, None));
+    }
+
+    Ok(ProvisionOutcome {
+        events,
+        workspace,
+        already_complete: false,
+        env_changes: vec![],
     })
 }
 
@@ -541,6 +700,11 @@ fn teardown_each(
     mut emit: impl FnMut(StepEvent<TeardownStep>),
 ) {
     emit(match proxy::remove_route(&ws.proxy_domain) {
+        _ if ws.bare => step(
+            TeardownStep::ProxyRoute,
+            Status::SkippedExisting,
+            Some("bare".to_string()),
+        ),
         Ok(Removal::Removed) => step(TeardownStep::ProxyRoute, Status::Done, None),
         Ok(Removal::AlreadyGone) => step(TeardownStep::ProxyRoute, Status::SkippedExisting, None),
         Err(e) => step(

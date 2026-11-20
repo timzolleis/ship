@@ -82,6 +82,7 @@ pub fn patch_env_content(
 ) -> EnvPatchResult {
     let mut changes = Vec::new();
     let mut lines = Vec::new();
+    let mut patched_keys = std::collections::HashSet::new();
 
     for line in content.split('\n') {
         let Some(caps) = LINE_RE.captures(line) else {
@@ -95,6 +96,7 @@ pub fn patch_env_content(
             lines.push(line.to_string());
             continue;
         };
+        patched_keys.insert(key.to_string());
 
         let value = strip_quotes(raw_value).to_string();
         let new_value = match var_config.var_type {
@@ -131,6 +133,28 @@ pub fn patch_env_content(
             });
         }
         lines.push(format!("{key}={new_value}"));
+    }
+
+    let trailing_newline = lines.last().is_some_and(|line| line.is_empty());
+    if trailing_newline {
+        lines.pop();
+    }
+    for (key, var_config) in vars {
+        if var_config.var_type != EnvVarType::WorkspaceValue || patched_keys.contains(key) {
+            continue;
+        }
+        let Some(workspace_value) = &var_config.value else {
+            continue;
+        };
+        changes.push(EnvChange {
+            key: key.clone(),
+            from: String::new(),
+            to: workspace_value.clone(),
+        });
+        lines.push(format!("{key}={workspace_value}"));
+    }
+    if trailing_newline {
+        lines.push(String::new());
     }
 
     EnvPatchResult {
@@ -207,6 +231,15 @@ mod tests {
             },
         );
         assert_eq!(out.content, "DATABASE_URL=\nSECRET=abc");
+        assert_eq!(out.changes.len(), 1);
+    }
+
+    #[test]
+    fn a_workspace_value_missing_from_the_file_is_added() {
+        let mut workspace_vars = vars(&[("OBJECT_STORAGE", EnvVarType::WorkspaceValue)]);
+        workspace_vars.get_mut("OBJECT_STORAGE").unwrap().value = Some("memory".into());
+        let out = patch_env_content("SECRET=abc\n", &workspace_vars, &ctx());
+        assert_eq!(out.content, "SECRET=abc\nOBJECT_STORAGE=memory\n");
         assert_eq!(out.changes.len(), 1);
     }
 

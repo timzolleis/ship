@@ -77,6 +77,27 @@ pub fn succeeds_in_dir(cwd: &str, script: &str, env: &[(&str, &str)]) -> bool {
 
 /// Runs `sh -c <script>` in `cwd` with inherited stdio. Nonzero exit is not an
 /// error — see exec_interactive.
+/// Like `exec_in_dir`, but a nonzero exit is an error: setup steps (install,
+/// migrate) that fail must stop provisioning instead of reporting success.
+pub fn exec_in_dir_checked(cwd: &str, script: &str, env: &[(&str, &str)]) -> Result<()> {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", script]).current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let status = cmd.status().map_err(|e| Error::ShellExec {
+        command: script.to_string(),
+        stderr: e.to_string(),
+    })?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::ShellExec {
+        command: script.to_string(),
+        stderr: format!("exited with {status}"),
+    })
+}
+
 pub fn exec_in_dir(cwd: &str, script: &str, env: &[(&str, &str)]) -> Result<()> {
     let mut cmd = Command::new("sh");
     cmd.args(["-c", script]).current_dir(cwd);

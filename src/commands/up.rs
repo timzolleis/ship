@@ -96,7 +96,11 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
             move_workspace_to_domain(w, &ws, &project_config)?;
         }
         if rename.is_some() || ws.ports != w.ports {
-            config::rename_workspace(&w.branch, &ws)?;
+            config::change_workspace_entry(&w.project, &w.branch, |stored| {
+                stored.branch = ws.branch.clone();
+                stored.proxy_domain = ws.proxy_domain.clone();
+                stored.ports = ws.ports.clone();
+            })?;
         }
         if let Some(rename) = &rename {
             println!(

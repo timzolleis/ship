@@ -211,6 +211,21 @@ mod tests {
     }
 
     #[test]
+    fn patching_a_patched_file_again_changes_nothing() {
+        let workspace_vars = vars(&[
+            ("DATABASE_URL", EnvVarType::DatabaseUrl),
+            ("BETTER_AUTH_URL", EnvVarType::ProxyUrl),
+        ]);
+        let once = patch_env_content(
+            "DATABASE_URL=postgresql://postgres:postgres@localhost:5433/znb\nBETTER_AUTH_URL=https://console.znb.localhost",
+            &workspace_vars,
+            &ctx(),
+        );
+        let twice = patch_env_content(&once.content, &workspace_vars, &ctx());
+        assert_eq!(twice.content, once.content);
+    }
+
+    #[test]
     fn unconfigured_keys_and_comments_survive() {
         let out = patch_env_content(
             "# comment\nSECRET=abc\nBETTER_AUTH_URL=https://console.znb.localhost",

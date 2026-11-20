@@ -11,23 +11,28 @@ pub struct WorkspaceRename {
 
 /// None when `branch` derives the domain the workspace already has.
 pub fn workspace_rename_from_branch(
-    ws: &Workspace,
-    pc: &ProjectConfig,
+    workspace: &Workspace,
+    project_config: &ProjectConfig,
     branch: &str,
 ) -> Option<WorkspaceRename> {
-    let names = derive_names(&pc.worktree, pc.database.as_ref(), &ws.project, branch);
-    (names.proxy_domain != ws.proxy_domain).then(|| WorkspaceRename {
+    let names = derive_names(
+        &project_config.worktree,
+        project_config.database.as_ref(),
+        &workspace.project,
+        branch,
+    );
+    (names.proxy_domain != workspace.proxy_domain).then(|| WorkspaceRename {
         branch: branch.to_string(),
         proxy_domain: names.proxy_domain,
     })
 }
 
 /// The workspace under its new branch and domain; everything else stays.
-pub fn renamed_workspace(ws: &Workspace, rename: &WorkspaceRename) -> Workspace {
+pub fn renamed_workspace(workspace: &Workspace, rename: &WorkspaceRename) -> Workspace {
     Workspace {
         branch: rename.branch.clone(),
         proxy_domain: rename.proxy_domain.clone(),
-        ..ws.clone()
+        ..workspace.clone()
     }
 }
 

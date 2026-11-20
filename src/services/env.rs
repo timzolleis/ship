@@ -41,10 +41,7 @@ pub fn patch_env_files(
                 detail: e.to_string(),
             })?;
         }
-        fs::write(&target_path, &patched.content).map_err(|e| Error::WriteFile {
-            path: target_path.display().to_string(),
-            detail: e.to_string(),
-        })?;
+        super::config::write_atomic(&target_path, &patched.content)?;
 
         results.push(PatchResult {
             file: file.clone(),

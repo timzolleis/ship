@@ -208,12 +208,19 @@ pub fn update_workspace(ws: &Workspace) -> Result<()> {
 
 /// Replaces the entry registered under `branch_before_rename` with `renamed`,
 /// keeping the registry's order.
-pub fn rename_workspace(branch_before_rename: &str, renamed: &Workspace) -> Result<()> {
+/// Applies `change` to the stored entry under the registry lock, so fields
+/// another writer saved after this process loaded the registry survive.
+pub fn change_workspace_entry(
+    project: &str,
+    branch: &str,
+    change: impl FnOnce(&mut Workspace),
+) -> Result<()> {
     update_registry(&config_dir(), |all| {
-        for w in all.iter_mut() {
-            if w.project == renamed.project && w.branch == branch_before_rename {
-                *w = renamed.clone();
-            }
+        if let Some(w) = all
+            .iter_mut()
+            .find(|w| w.project == project && w.branch == branch)
+        {
+            change(w);
         }
     })
 }

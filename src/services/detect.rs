@@ -73,6 +73,7 @@ pub fn scan(root: &Path, db_container: Option<&str>) -> Detected {
                     var_type: kind,
                     path: None,
                     port: None,
+                    value: None,
                 },
             );
             values.insert(key, value);

@@ -5,7 +5,9 @@ use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green, red, yellow};
 use crate::prompt::{self, Unattended};
 use crate::services::env::PatchResult;
-use crate::services::workspace::{provision, ProvisionInput, ProvisionStep, Status, StepEvent};
+use crate::services::workspace::{
+    provision, ProvisionInput, ProvisionOutcome, ProvisionStep, Status, StepEvent,
+};
 use crate::services::{config, editor};
 use crate::ui::{self, Row, Table};
 use std::process::ExitCode;
@@ -189,7 +191,12 @@ pub fn run(
     editor: Option<bool>,
     bare: bool,
 ) -> ExitCode {
-    match run_inner(project, branch, base, editor, bare) {
+    finish_provision(run_inner(project, branch, base, editor, bare))
+}
+
+/// `finish` with a hint for the one failure the person fixes outside ship.
+pub fn finish_provision(result: Result<()>) -> ExitCode {
+    match result {
         Err(e @ Error::DatabaseUnreachable { .. }) => {
             eprintln!();
             eprintln!("  {} {}", red("✗"), e);
@@ -237,17 +244,8 @@ fn run_inner(
         None => prompt::input("Branch name:", None, "<branch>")?,
     };
 
-    // Render context (derived names — single source of truth in domain).
-    let names = derive_names(
-        &project_config.worktree,
-        project_config.database.as_ref(),
-        &project,
-        &branch,
-    );
-    println!();
-
     // 3. Provision.
-    let outcome = provision(&ProvisionInput {
+    let outcome = provision_and_print_workspace(&ProvisionInput {
         project_alias: &project,
         project_config: &project_config,
         branch: &branch,
@@ -255,8 +253,64 @@ fn run_inner(
         bare,
     })?;
 
+    if outcome.already_complete {
+        // A resumed workspace always asks; the stored preference is for new ones.
+        let open = match editor_launch::decide(editor_flag, None, ui::interactive()) {
+            EditorLaunch::Open => true,
+            EditorLaunch::Skip => false,
+            EditorLaunch::Ask => {
+                prompt::confirm("Open in editor?", true, Unattended::Answer(false))?
+            }
+        };
+        if open {
+            editor::open(&outcome.workspace.path);
+        }
+        return Ok(());
+    }
+
+    // 4. Editor: the flag wins; otherwise only a terminal session opens it
+    // (prompt once, persist the answer). Unattended runs store nothing.
+    let ship_config = config::load_config()?;
+    let launch =
+        editor_launch::decide(editor_flag, ship_config.auto_open_editor, ui::interactive());
+    let should_open = match launch {
+        EditorLaunch::Open => true,
+        EditorLaunch::Skip => false,
+        EditorLaunch::Ask => {
+            let v = prompt::confirm("Open workspace in editor?", true, Unattended::Answer(false))?;
+            config::update_config(|c| c.auto_open_editor = Some(v))?;
+            v
+        }
+    };
+    if should_open {
+        editor::open(&outcome.workspace.path);
+    }
+
+    print_ready();
+    Ok(())
+}
+
+pub fn print_ready() {
+    println!("  {}", green("Ready."));
+    println!();
+}
+
+/// Provision and print each step, then either the existing workspace's
+/// summary or the env changes. Both end with a blank line.
+pub fn provision_and_print_workspace(input: &ProvisionInput) -> Result<ProvisionOutcome> {
+    let project_config = input.project_config;
+    let names = derive_names(
+        &project_config.worktree,
+        project_config.database.as_ref(),
+        input.project_alias,
+        input.branch,
+    );
+    println!();
+
+    let outcome = provision(input)?;
+
     let ctx = RenderContext {
-        branch: branch.clone(),
+        branch: input.branch.to_string(),
         // Provision may adopt a checkout made outside ship; its path wins.
         worktree_dir: outcome.workspace.path.clone(),
         database: names
@@ -273,7 +327,7 @@ fn run_inner(
         }
     }
 
-    // Already fully provisioned → short-circuit message + open prompt.
+    // Already fully provisioned → short-circuit message.
     if outcome.already_complete {
         let w = &outcome.workspace;
         println!("  Already exists: {} in {}", bold(&w.branch), dim(&w.path));
@@ -296,18 +350,7 @@ fn run_inner(
             }
         }
         println!();
-        // A resumed workspace always asks; the stored preference is for new ones.
-        let open = match editor_launch::decide(editor_flag, None, ui::interactive()) {
-            EditorLaunch::Open => true,
-            EditorLaunch::Skip => false,
-            EditorLaunch::Ask => {
-                prompt::confirm("Open in editor?", true, Unattended::Answer(false))?
-            }
-        };
-        if open {
-            editor::open(&w.path);
-        }
-        return Ok(());
+        return Ok(outcome);
     }
 
     // Env changes (rendered from the result).
@@ -319,27 +362,6 @@ fn run_inner(
             println!("{line}");
         }
     }
-
-    // 4. Editor: the flag wins; otherwise only a terminal session opens it
-    // (prompt once, persist the answer). Unattended runs store nothing.
     println!();
-    let ship_config = config::load_config()?;
-    let launch =
-        editor_launch::decide(editor_flag, ship_config.auto_open_editor, ui::interactive());
-    let should_open = match launch {
-        EditorLaunch::Open => true,
-        EditorLaunch::Skip => false,
-        EditorLaunch::Ask => {
-            let v = prompt::confirm("Open workspace in editor?", true, Unattended::Answer(false))?;
-            config::update_config(|c| c.auto_open_editor = Some(v))?;
-            v
-        }
-    };
-    if should_open {
-        editor::open(&outcome.workspace.path);
-    }
-
-    println!("  {}", green("Ready."));
-    println!();
-    Ok(())
+    Ok(outcome)
 }

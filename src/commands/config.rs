@@ -344,6 +344,9 @@ fn print_project(alias: &str, project: &ProjectConfig, lines: &LineMap) -> Resul
             if let (EnvVarType::DevUrl, Some(p)) = (&cfg.var_type, &cfg.path) {
                 handling = format!("{handling} {p}");
             }
+            if let (EnvVarType::WorkspaceValue, Some(v)) = (&cfg.var_type, &cfg.value) {
+                handling = format!("{handling} '{v}'");
+            }
             rows.push(Row::new(
                 (),
                 [blue(file_cell), key.clone(), handling, dim(line)],

@@ -1,8 +1,11 @@
+use crate::domain::env_patch::{DatabaseTarget, EnvPatchContext};
 use crate::domain::ports as domain_ports;
 use crate::domain::workspace_locate::locate_workspace;
+use crate::domain::workspace_rename::{renamed_workspace, workspace_rename_from_branch};
 use crate::errors::{Error, Result};
 use crate::fmt::{blue, bold, dim, green};
-use crate::services::{config, ports, proxy, shell};
+use crate::schema::{ProjectConfig, Workspace};
+use crate::services::{config, env, git, ports, proxy, shell};
 use crate::util::cwd_string;
 use indexmap::IndexMap;
 use std::process::ExitCode;
@@ -11,7 +14,8 @@ use std::process::ExitCode;
 // ship up [--open]
 //
 // Locate the current workspace via the pure locator, falling back to a
-// registered project root checkout. Ensure the proxy is running and the route
+// registered project root checkout. A workspace whose branch was renamed
+// moves to the new branch's domain. Ensure the proxy is running and the route
 // exists, then run the dev command with PORT, one <NAME>_PORT per named port,
 // and `{port}` / `{port:<name>}` substituted.
 // ---------------------------------------------------------------------------
@@ -29,6 +33,40 @@ pub fn run(open: bool) -> ExitCode {
     super::finish(run_inner(&cwd_string(), open))
 }
 
+/// Drops the old route and points the checkout's `.env` files at the new
+/// domain; the route step adds the new route. A domain another port already
+/// serves fails before anything changes.
+fn move_workspace_to_domain(
+    before: &Workspace,
+    renamed: &Workspace,
+    project_config: &ProjectConfig,
+) -> Result<()> {
+    let taken = proxy::get_routes()?
+        .iter()
+        .any(|route| route.serves(&renamed.proxy_domain) && route.port != renamed.port);
+    if taken {
+        return Err(Error::RouteExists {
+            domain: renamed.proxy_domain.clone(),
+        });
+    }
+    proxy::remove_route(&before.proxy_domain)?;
+    env::patch_env_files(
+        &renamed.path,
+        &renamed.path,
+        &project_config.env,
+        &EnvPatchContext {
+            database: renamed
+                .db_name
+                .clone()
+                .map_or(DatabaseTarget::Unchanged, DatabaseTarget::Named),
+            proxy_domain: renamed.proxy_domain.clone(),
+            port: renamed.port,
+            ports: renamed.ports.clone(),
+        },
+    )?;
+    Ok(())
+}
+
 fn run_inner(cwd: &str, open: bool) -> Result<()> {
     let workspaces = config::load_workspaces()?;
 
@@ -44,18 +82,41 @@ fn run_inner(cwd: &str, open: bool) -> Result<()> {
         // A port named after the workspace was created gets its value now.
         let mut used = ports::used()?;
         let named = domain_ports::assign(&project_config.ports, &w.ports, &mut used);
-        if named != w.ports {
-            config::update_workspace(&crate::schema::Workspace {
-                ports: named.clone(),
-                ..w.clone()
+        let with_ports = Workspace {
+            ports: named,
+            ..w.clone()
+        };
+        let rename = git::current_branch(&w.path)?
+            .and_then(|branch| workspace_rename_from_branch(w, &project_config, &branch));
+        let ws = match &rename {
+            Some(rename) => renamed_workspace(&with_ports, rename),
+            None => with_ports,
+        };
+        if rename.is_some() {
+            move_workspace_to_domain(w, &ws, &project_config)?;
+        }
+        if rename.is_some() || ws.ports != w.ports {
+            config::change_workspace_entry(&w.project, &w.branch, |stored| {
+                stored.branch = ws.branch.clone();
+                stored.proxy_domain = ws.proxy_domain.clone();
+                stored.ports = ws.ports.clone();
             })?;
         }
+        if let Some(rename) = &rename {
+            println!(
+                "  {} {} {} {}",
+                green("●"),
+                dim(&w.proxy_domain),
+                dim("moved to"),
+                bold(&rename.proxy_domain)
+            );
+        }
         UpTarget {
-            project: w.project.clone(),
-            domain: w.proxy_domain.clone(),
-            port: w.port,
-            ports: named,
-            path: w.path.clone(),
+            project: ws.project,
+            domain: ws.proxy_domain,
+            port: ws.port,
+            ports: ws.ports,
+            path: ws.path,
         }
     } else {
         let ship_config = config::load_config()?;

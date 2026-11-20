@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 //   - proxy_url    → swap the http(s)://<origin> for https://<proxy_domain>.
 //   - dev_url      → http://localhost:<port><configured path suffix>.
 //   - port         → <port>.
+//   - workspace_value → its configured `value`; untouched without one.
 //   - plain        → untouched.
 //   - dev_url and port take the routed port, or the named one in `port`; a
 //     name the workspace lacks leaves the value untouched (`ports::check`
@@ -81,6 +82,7 @@ pub fn patch_env_content(
 ) -> EnvPatchResult {
     let mut changes = Vec::new();
     let mut lines = Vec::new();
+    let mut patched_keys = std::collections::HashSet::new();
 
     for line in content.split('\n') {
         let Some(caps) = LINE_RE.captures(line) else {
@@ -94,6 +96,7 @@ pub fn patch_env_content(
             lines.push(line.to_string());
             continue;
         };
+        patched_keys.insert(key.to_string());
 
         let value = strip_quotes(raw_value).to_string();
         let new_value = match var_config.var_type {
@@ -118,6 +121,7 @@ pub fn patch_env_content(
                 Some(port) => port.to_string(),
                 None => value.clone(),
             },
+            EnvVarType::WorkspaceValue => var_config.value.clone().unwrap_or_else(|| value.clone()),
             EnvVarType::Plain => value.clone(),
         };
 
@@ -129,6 +133,28 @@ pub fn patch_env_content(
             });
         }
         lines.push(format!("{key}={new_value}"));
+    }
+
+    let trailing_newline = lines.last().is_some_and(|line| line.is_empty());
+    if trailing_newline {
+        lines.pop();
+    }
+    for (key, var_config) in vars {
+        if var_config.var_type != EnvVarType::WorkspaceValue || patched_keys.contains(key) {
+            continue;
+        }
+        let Some(workspace_value) = &var_config.value else {
+            continue;
+        };
+        changes.push(EnvChange {
+            key: key.clone(),
+            from: String::new(),
+            to: workspace_value.clone(),
+        });
+        lines.push(format!("{key}={workspace_value}"));
+    }
+    if trailing_newline {
+        lines.push(String::new());
     }
 
     EnvPatchResult {
@@ -161,6 +187,7 @@ mod tests {
                         var_type: *t,
                         path: None,
                         port: None,
+                        value: None,
                     },
                 )
             })
@@ -208,6 +235,30 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_value_missing_from_the_file_is_added() {
+        let mut workspace_vars = vars(&[("OBJECT_STORAGE", EnvVarType::WorkspaceValue)]);
+        workspace_vars.get_mut("OBJECT_STORAGE").unwrap().value = Some("memory".into());
+        let out = patch_env_content("SECRET=abc\n", &workspace_vars, &ctx());
+        assert_eq!(out.content, "SECRET=abc\nOBJECT_STORAGE=memory\n");
+        assert_eq!(out.changes.len(), 1);
+    }
+
+    #[test]
+    fn patching_a_patched_file_again_changes_nothing() {
+        let workspace_vars = vars(&[
+            ("DATABASE_URL", EnvVarType::DatabaseUrl),
+            ("BETTER_AUTH_URL", EnvVarType::ProxyUrl),
+        ]);
+        let once = patch_env_content(
+            "DATABASE_URL=postgresql://postgres:postgres@localhost:5433/znb\nBETTER_AUTH_URL=https://console.znb.localhost",
+            &workspace_vars,
+            &ctx(),
+        );
+        let twice = patch_env_content(&once.content, &workspace_vars, &ctx());
+        assert_eq!(twice.content, once.content);
+    }
+
+    #[test]
     fn unconfigured_keys_and_comments_survive() {
         let out = patch_env_content(
             "# comment\nSECRET=abc\nBETTER_AUTH_URL=https://console.znb.localhost",
@@ -218,6 +269,20 @@ mod tests {
             out.content,
             "# comment\nSECRET=abc\nBETTER_AUTH_URL=https://tim-feature.znb.localhost"
         );
+        assert_eq!(out.changes.len(), 1);
+    }
+
+    #[test]
+    fn workspace_value_replaces_the_main_checkouts_value() {
+        let vars: EnvFileVars = serde_json::from_str(
+            r#"{
+              "OBJECT_STORAGE": { "type": "workspace_value", "value": "memory" },
+              "EMAIL_DELIVERY": { "type": "workspace_value" }
+            }"#,
+        )
+        .unwrap();
+        let out = patch_env_content("OBJECT_STORAGE=s3\nEMAIL_DELIVERY=smtp", &vars, &ctx());
+        assert_eq!(out.content, "OBJECT_STORAGE=memory\nEMAIL_DELIVERY=smtp");
         assert_eq!(out.changes.len(), 1);
     }
 

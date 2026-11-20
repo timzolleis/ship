@@ -229,7 +229,11 @@ fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues
         let current = files[file][key].var_type;
         // Current handling first so enter keeps it (the picker starts on row 0).
         let choices: Vec<EnvVarType> = std::iter::once(current)
-            .chain(EnvVarType::ALL.into_iter().filter(|t| *t != current))
+            .chain(
+                EnvVarType::ALL
+                    .into_iter()
+                    .filter(|t| *t != current && *t != EnvVarType::WorkspaceValue),
+            )
             .collect();
         let rows = choices
             .into_iter()
@@ -257,10 +261,14 @@ fn review_env_vars(files: &mut IndexMap<String, EnvFileVars>, values: &EnvValues
         let port = matches!(chosen, EnvVarType::DevUrl | EnvVarType::Port)
             .then(|| files[file][key].port.clone())
             .flatten();
+        let value = (chosen == EnvVarType::WorkspaceValue)
+            .then(|| files[file][key].value.clone())
+            .flatten();
         files[file][key] = EnvVarConfig {
             var_type: chosen,
             path,
             port,
+            value,
         };
 
         println!();

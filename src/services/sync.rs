@@ -67,7 +67,7 @@ pub fn sync(pc: &ProjectConfig, base: Option<&str>) -> Result<SyncResult> {
     if head_moved {
         if !pc.commands.install.is_empty() {
             for cmd in &pc.commands.install {
-                shell::exec_in_dir(repo, cmd, NON_INTERACTIVE_ENV)?;
+                shell::exec_in_dir_checked(repo, cmd, NON_INTERACTIVE_ENV)?;
             }
             installed = true;
         }
@@ -79,7 +79,7 @@ pub fn sync(pc: &ProjectConfig, base: Option<&str>) -> Result<SyncResult> {
             .is_none_or(|d| database::ping(DbTarget::from(d)));
         if !pc.commands.db.is_empty() && reachable {
             for cmd in &pc.commands.db {
-                shell::exec_in_dir(repo, cmd, NON_INTERACTIVE_ENV)?;
+                shell::exec_in_dir_checked(repo, cmd, NON_INTERACTIVE_ENV)?;
             }
             migrated = true;
         }

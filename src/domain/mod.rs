@@ -10,3 +10,4 @@ pub mod removal;
 pub mod session_slug;
 pub mod workspace_locate;
 pub mod workspace_name;
+pub mod workspace_rename;

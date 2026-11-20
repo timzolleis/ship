@@ -94,6 +94,7 @@ Workspace lifecycle
   ship create ep feat --base develop    Branch off a specific base
   ship create ep feat --no-editor       Don't open the editor (--editor forces it)
   ship create ep feat --bare            Worktree + copied files + .env (database URL empty) + install; no database, port or route
+  ship adopt                            Provision the worktree you are in (project and branch from git)
   ship down [project] [branch]          Tear down (cwd workspace, or a picker)
   ship down --force                     Skip confirmation and dirty-worktree checks
   ship down --db-only                   Drop the database and route, keep the worktree
@@ -209,7 +210,7 @@ with a warm store). The workspace is registered with `bare: true`, so `ls`, `dow
 `ship create` on it without `--bare` upgrades it: database, port, route, patched `.env`.
 Like a normal create, it is idempotent and resumes.
 
-**Worktree root.** `ship config worktree-root ~/.herdr/worktrees` sends every new
+**Worktree root.** `ship config worktree-root ~/worktrees` sends every new
 worktree to `<root>/<repo>/<branch_slug>` (`<repo>` is the main checkout's directory
 name) instead of the project's `dirPattern`. `--clear` undoes it. A branch already
 checked out elsewhere is still adopted where it is.
@@ -231,7 +232,7 @@ What happens, in order:
    installed or migrated; that is `ship sync`. A failed fetch is a warning.
 4. **Worktree** at the configured `dirPattern`: an existing branch, or a new one from
    the start ref, created with `--no-track` so `git push` never targets main. A branch
-   already checked out in another worktree (one Herdr made, say) is adopted where it is.
+   already checked out in another worktree (one another tool made, say) is adopted where it is.
 5. **Copy** the project's `copy` paths into the worktree. A missing source is a warning.
 6. **Env.** Each configured `.env` is copied and its variables rewritten. The changes
    are printed as a before/after diff.
@@ -244,6 +245,24 @@ What happens, in order:
     (`autoOpenEditor`). Without a terminal it never opens, whatever the preference, so
     agents don't get an editor window per workspace. `--editor` / `--no-editor` override
     both.
+
+### `ship adopt`
+
+Run inside a worktree another tool made (an agent app, an IDE). ship reads the project
+from git (the main checkout behind `git rev-parse --git-common-dir`) and the branch from
+HEAD, then runs the same steps as `ship create` on that checkout: database clone,
+`.env` patching, ports, install, proxy route. It never fetches a base, never opens an
+editor and takes no arguments, so it fits a tool's worktree-created hook:
+
+```bash
+ship adopt                       # on worktree creation
+ship up                          # dev server
+ship down --db-only --force      # when the tool is done with the worktree: keeps the checkout
+```
+
+It fails in a checkout of a project ship doesn't know (run `ship init` in the main
+checkout first), in the main checkout itself, and on a detached HEAD. Like `create`, it
+is idempotent: a second run prints the existing workspace.
 
 ### `ship down` and `ship gc`
 
@@ -284,6 +303,13 @@ substituted, and an unknown name fails before anything runs. A port the project 
 after the workspace was created is allocated here and saved.
 `--open` opens the browser two seconds in. A dev server that exits nonzero does not
 fail `ship up`.
+
+The domain follows the branch: when the worktree's branch was renamed since the
+workspace was made, `ship up` moves it to the new branch's domain. The old route goes,
+`proxy_url` vars in the worktree's `.env` files point at the new domain, and the
+registry entry takes the new branch. The database keeps its name. Two branches that
+slug alike (`feat/a-b`, `feat-a-b`) fail the move with `Route ... already exists`; a
+server already running keeps the old URL until the next `ship up`.
 
 ### `ship open`
 
@@ -406,9 +432,13 @@ tim-ep-241.ep.localhost {
 | `dev_url` (path `/api/auth`) | `http://localhost:3000/api/auth` | `http://localhost:5175/api/auth` |
 | `dev_url` (port `api`) | `http://localhost:3000` | `http://localhost:5176` |
 | `port` (port `api`) | `3000` | `5176` |
+| `workspace_value` (value `memory`) | `s3` | `memory` |
 | `plain` | `file:../../dev/database.db` | `file:../../dev/database.db` |
 
-`dev_url` and `port` take the routed port, or the named port in `"port"`. Only `KEY=VALUE` lines whose key is configured are touched. Comments, blank lines and
+`dev_url` and `port` take the routed port, or the named port in `"port"`.
+`workspace_value` gives every workspace the same `"value"` in place of the main
+checkout's, e.g. `{ "type": "workspace_value", "value": "memory" }` for in-memory
+storage in workspaces. `ship init` never proposes it; write it into `config.json`. Only `KEY=VALUE` lines whose key is configured are touched. Comments, blank lines and
 unconfigured keys are preserved byte for byte.
 
 ## Configuration
@@ -482,30 +512,6 @@ same pool as the routes, so no two collide. None is routed through the proxy.
 the host instead of inside a container. Leave `database` out for a project without
 Postgres. Older configs with a flat `env.autoDetected` map or a `worktree.dbNamePattern`
 are still read and rewritten to the current shape on the next save.
-
-### Herdr
-
-`herdr-plugin/` provisions a ship workspace for every worktree Herdr creates in a ship
-project. Herdr's new-worktree dialog makes the worktree; the plugin lays the new Herdr
-workspace out as three tabs:
-
-- `agent` runs pi.
-- `dev` runs `ship create` (database, `.env`, install, proxy route), shows the URL in
-  the sidebar as `$url`, then runs `ship up`. A failed create stops at the shell;
-  re-run the command to resume.
-- `terminal` is a plain shell.
-
-Removing the worktree in Herdr runs `ship down` for it in the background: route,
-database, registry entry and agent sessions go, and the branch stays if it holds
-unpushed commits. The output is in `herdr plugin log list --plugin ship`.
-
-Other repos are left alone.
-
-```bash
-herdr plugin install timzolleis/ship/herdr-plugin   # or: herdr plugin link ./herdr-plugin
-```
-
-Needs `ship` and `jq` on the Herdr server's `PATH`.
 
 ### Agent sessions
 

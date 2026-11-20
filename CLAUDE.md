@@ -36,17 +36,18 @@ src/
 │   ├── db_orphans.rs    # Databases matching a project pattern that no workspace claims
 │   ├── detect.rs        # What init may conclude from a repo: package manager, commands, env kinds, database
 │   ├── editor_launch.rs # Whether `create` opens the editor: flag, then terminal, then stored preference
-│   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url/port)
+│   ├── env_patch.rs     # .env line rewriting (database_url/proxy_url/dev_url/port/workspace_value)
 │   ├── ports.rs         # Port pool, named-port assignment, <NAME>_PORT, {port:<name>} substitution
 │   ├── removal.rs       # Removed vs AlreadyGone — a teardown step's two successes
 │   ├── remote_branch.rs # Safe default vs explicit remote-branch deletion policy
 │   ├── session_slug.rs  # Agent session dir name ↔ path (a `-` is a literal or a `/`)
 │   ├── workspace_locate.rs  # cwd/branch-query → workspace resolution
-│   └── workspace_name.rs    # Slugging + {placeholder} pattern resolution (both directions)
+│   ├── workspace_name.rs    # Slugging + {placeholder} pattern resolution (both directions)
+│   └── workspace_rename.rs  # Branch renamed under a workspace → its new branch and domain (db_name stays)
 ├── services/            # IO layer — plain module functions
 │   ├── shell.rs         # Subprocess exec (captured, interactive, sh -c in dir)
 │   ├── runner.rs        # ExecutionRuntime dispatch: local passthrough vs docker exec
-│   ├── git.rs           # Worktree/branch ops over shell
+│   ├── git.rs           # Worktree/branch ops over shell; main checkout and HEAD branch of a dir
 │   ├── github.rs        # PR lookup via gh CLI (parallel) + shared PR label
 │   ├── database.rs      # Postgres CLI ops (createdb/dropdb/psql/pg_dump) over runner
 │   ├── detect.rs        # Reads a repo for init: .env files, lockfiles, package.json, ignored state, docker ports
@@ -61,6 +62,8 @@ src/
 │   ├── updater.rs       # GitHub-release self-update + background version-check cache
 │   └── workspace.rs     # Orchestrator: provision / teardown / reset state machines
 └── commands/            # One module per subcommand; owns rendering + error printing
+    ├── create.rs        # `create`; its provision + render path is shared with `adopt`
+    ├── adopt.rs         # `adopt`: provision the cwd's worktree, project and branch from git, no editor
     └── teardown.rs      # Not a subcommand: shared teardown checklist for `down` and `gc`
 skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzolleis/ship -g` — keep it in step with the CLI
 ```
@@ -70,7 +73,7 @@ skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzollei
 - **Layering**: commands → services → domain. Domain modules are pure (no IO); services do IO through `shell`/`runner`; commands only render and prompt. Don't shell out from commands directly. `ui/` is presentation only — it never learns what a workspace or a PR is; callers map their own values into `Update`s.
 - **Errors**: one `Error` variant per failure mode in `src/errors.rs`, with the user-facing message in `#[error(...)]`. Commands catch at their boundary and print (`commands::finish` for the shared `Error:` format, or command-specific formats) — they don't propagate to `main`.
 - **Exit codes**: every command's `run` returns `ExitCode`, and any failure is `FAILURE` — agents read the status, not the text. A failure path never prints `✗` and returns `Ok`; it returns an `Error`. `down`/`gc` return `Result<ExitCode>` (`commands::finish_with`) because a summary can be printed and still mean part of it failed. A human cancelling a picker or confirm is a success.
-- **Nonzero exits**: `shell::exec` (captured) fails on nonzero exit; `exec_interactive`/`exec_in_dir` (inherited stdio) deliberately do NOT — only spawn failures error. A failing dev server must not fail `ship up`.
+- **Nonzero exits**: `shell::exec` (captured) and `exec_in_dir_checked` fail on nonzero exit; provisioning, reset and sync run install/migrate through `exec_in_dir_checked`, so a failed migration stops them. `exec_interactive`/`exec_in_dir` (inherited stdio) deliberately do NOT — only spawn failures error. A failing dev server must not fail `ship up`.
 - **Formatting**: import from `src/fmt.rs`. Never define local ANSI helpers. Color is dropped automatically when stdout isn't a TTY or `NO_COLOR` is set.
 - **Aligned columns**: build `ui::Row`s and let `ui::Table` measure them. It ignores ANSI codes, so cells may arrive pre-colored. Hand-rolled `{:<22}` padding breaks on long values — that's what it replaced. Every listing and picker titles its columns the way `ship ls` does: a dimmed uppercase header row, no `───` rules. `Picker::header` lines titles up past the pointer and checkbox; a static table measures its header with `Table::widen`.
 - **Workspace order**: every listing sorts with `Workspace::listing_order` (project, then branch). The registry stays in creation order; only what is shown gets sorted.
@@ -80,8 +83,8 @@ skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzollei
 - **Already gone is a success**: teardown must be safe to retry, so `git`'s and `proxy`'s removal calls return `domain::removal::Removal` and a missing target lands as `Status::SkippedExisting`. Treating absence as a failure keeps the registry entry, and every retry fails on the same missing target — the entry never clears. `delete_remote_branch` pushes first and only runs `ls-remote` when the push fails, so the common path pays one round trip.
 - **`ship gc` has three exclusive modes**: default sweeps workspaces (blocking PR lookup, then a picker with merged rows pre-checked), `--databases` sweeps unclaimed databases, `--sessions` sweeps orphaned agent transcripts. The database sweep pings every project's server, which is why it is not part of the default run.
 - **Live step lists**: pair `ui::Tree` with a `*_stream` service that runs the work on threads and sends one event per finished step (`workspace::teardown_all_stream`). A section's `Pace` decides which rows may spin: `Sequential` spins the first unfinished row, `Concurrent` spins every unfinished one. `Mark::running` swaps a row's text without stopping its spinner. Only steps whose output is captured may animate — `sync`'s install/migrate commands inherit stdio and would trample the table, which is why provisioning still buffers.
-- **Parallel teardown's shared writers**: steps run on one thread per workspace, so anything with a read-modify-write needs an owner. The Caddyfile has a mutex in `proxy` (two threads would otherwise read the same text and the last writer would strand a route); `git` takes one lock per repo (two ref updates in one repo race for `packed-refs.lock`); `workspaces.json` is only ever written by `teardown::run_all` on the main thread, after the render loop ends.
-- **Env rewriting**: `env.files` maps each .env path to its own vars, because one name needs different handling per package (shared postgres `DATABASE_URL` gets rewritten, a worktree-relative sqlite one is `plain`). The pre-per-file flat `autoDetected` shape still decodes by fanning every var out to every file. `ship config show` reports the stored handling with on-disk line numbers.
+- **Parallel teardown's shared writers**: steps run on one thread per workspace, so anything with a read-modify-write needs an owner. The Caddyfile has a mutex in `proxy` (two threads would otherwise read the same text and the last writer would strand a route); `git` takes one lock per repo (two ref updates in one repo race for `packed-refs.lock`); `workspaces.json` is only ever written by `teardown::run_all` on the main thread, after the render loop ends. Single writers outside teardown (`create`, `up`) go through `services::config`'s load-modify-save functions, which hold the registry lock.
+- **Env rewriting**: `workspace_value` sets a var to its `value` in every workspace; `init` never proposes it (no evidence can), it is written by hand. `env.files` maps each .env path to its own vars, because one name needs different handling per package (shared postgres `DATABASE_URL` gets rewritten, a worktree-relative sqlite one is `plain`). The pre-per-file flat `autoDetected` shape still decodes by fanning every var out to every file. `ship config show` reports the stored handling with on-disk line numbers.
 - **Agent sessions**: every harness stores transcripts in one dir per project path, flattening `/` to `-` — `services::agent::STORES` lists the roots. The flattening is lossy, so a name only proves which path it means when that path exists: `session_slug::resolve` tries each `-` both ways and prunes against the filesystem. `gc --sessions` only considers names under a project's worktree prefix and only deletes ones no live path claims. Teardown skips the step when `deleteAgentSessions` is false.
 - **Workspace state has three sources**: tracked files come from the git checkout, postgres from `database::clone_db`, and file-backed state (sqlite, certs, fixtures) from `copy::copy_paths` over the project's `copy` list. `init` proposes copy paths only when git ignores them — tracked files already arrive with the checkout.
 - **Optional database**: `ProjectConfig.database` and `Workspace.db_name` are `Option`. Without a database, `create`, teardown and `sync` skip their database steps; `reset`, `db exec` and `open db` fail with `Error::NoDatabase`. The local runtime runs the Postgres CLI against the default server, so it only reaches `localhost:5432`.
@@ -89,6 +92,8 @@ skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzollei
 - **Prompts**: through `src/prompt.rs` only (it strips trailing `:` — dialoguer adds its own). A single choice is `prompt::pick(msg, header, rows, hint)`, which returns the picked row's value. Reach for `ui::Picker` directly only for checkboxes, streaming cells, or the picked row's cells.
 - **Unattended mode**: `ui::interactive()` (stdin and stderr are terminals) is the one switch. Without a terminal every prompt answers itself: `input` takes its default, `confirm` takes `Unattended::Answer(bool)` or fails with `Unattended::Require(hint)`, pickers fail. A failure is `Error::NeedsInput` naming the flag or argument that answers the prompt. A prompt with no safe answer gets a `Require` — never a guess.
 - **Never guess**: `init` writes a field only from evidence (`domain::detect`); with none it stays empty and lands in the `Left empty` report with the reason. No hardcoded fallbacks for project facts (commands, database, ports) — a failed lookup is an error, not a default.
+- **Adopting a checkout**: `ship adopt` runs `create`'s provision path on the cwd's worktree, with the project from `git::main_checkout_path` and the branch from `git::current_branch`. It never opens an editor and takes no arguments, so a tool's worktree hook can run it as is.
+- **The domain follows the branch**: `ship up` asks `domain::workspace_rename` whether HEAD's branch derives a new domain; if so it drops the old route, re-patches the worktree's `.env` files in place, and re-keys the registry entry (`config::rename_workspace`). The database keeps its name.
 - **Editor opening**: always `editor::open()`, never exec an editor directly. `create` asks `domain::editor_launch::decide`: `--editor`/`--no-editor` win; without a terminal it never opens, even with `autoOpenEditor: true` — agents make throwaway workspaces.
 - **Config JSON**: camelCase keys, 2-space pretty print, trailing newline. `IndexMap` preserves key order. Legacy shapes decode through a repr and are written back canonically on the next save — flat `env.autoDetected` (`EnvConfigRepr`) and `worktree.dbNamePattern` (`ProjectConfigRepr`, moved into `database.namePattern`). Keep that tolerance.
 - **Versioning**: `build.rs` embeds the git short SHA (or `$SHIP_VERSION` when set — CI uses this to pin the binary version to the release tag). Debug builds report `dev`, which disables update checks and self-update.
@@ -97,7 +102,7 @@ skills/ship/SKILL.md     # Agent skill, installed with `npx skills add timzollei
 
 ## Error Variants (src/errors.rs)
 
-`InvalidPortName`, `UnknownPort`, `InvalidPortValue`, `ProjectNotFound`, `ParseConfig`, `ConfigOutdated`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `ProxyReload`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `NoProjects`, `NotInWorkspace`, `NotInProject`, `UnknownTarget`, `NeedsInput`, `NoDatabase`, `Prompt`.
+`InvalidPortName`, `UnknownPort`, `InvalidPortValue`, `ProjectNotFound`, `ParseConfig`, `ConfigOutdated`, `EncodeConfig`, `CreateDirectory`, `ReadFile`, `WriteFile`, `ShellExec`, `Database`, `DatabaseUnreachable`, `RouteExists`, `ProxyReload`, `CertNotFound`, `UpdateCheck`, `UpdateDownload`, `UpdateInstall`, `UnsupportedPlatform`, `WorkspaceNotFound`, `NoActiveWorkspaces`, `NoProjects`, `NotInWorkspace`, `NotInProject`, `NotInProjectCheckout`, `AdoptMainCheckout`, `DetachedHead`, `UnknownTarget`, `NeedsInput`, `NoDatabase`, `BareWorkspace`, `Prompt`.
 
 ## Config Storage
 

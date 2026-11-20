@@ -58,6 +58,8 @@ enum Cmd {
         #[arg(long)]
         bare: bool,
     },
+    /// Provision the checkout in the current directory as a workspace: database, .env, ports, install, route. Project and branch come from git; never opens an editor
+    Adopt,
     /// Tear down a workspace: route, database, worktree, local branch, and the remote branch once its PR is closed or merged
     Down {
         /// Project alias (default: the workspace containing the current directory)
@@ -171,6 +173,7 @@ fn help_text() -> String {
 
   {lifecycle}
     {create} [project] [branch] [--no-editor] [--bare]   Create or resume a workspace
+    {adopt}                         Provision the worktree you are in
     {down}   [project] [branch] [--remote]   Tear down a workspace
     {ls}     [project] [--json]     List active workspaces
 
@@ -228,6 +231,7 @@ fn help_text() -> String {
         config_sessions = blue("config sessions"),
         lifecycle = bold("Workspace Lifecycle"),
         create = blue("create"),
+        adopt = blue("adopt"),
         down = blue("down"),
         ls = blue("ls"),
         dev_server = bold("Dev Server"),
@@ -284,6 +288,7 @@ fn dispatch(cmd: Cmd) -> ExitCode {
             };
             commands::create::run(project, branch, base, editor, bare)
         }
+        Cmd::Adopt => commands::adopt::run(),
         Cmd::Down {
             project,
             branch,

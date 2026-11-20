@@ -132,7 +132,7 @@ pub enum ResetStep {
 // Run every command in a scope, in order, in `dir`. Non-interactive env.
 fn run_scope(dir: &str, cmds: &[String]) -> Result<()> {
     for cmd in cmds {
-        shell::exec_in_dir(dir, cmd, NON_INTERACTIVE_ENV)?;
+        shell::exec_in_dir_checked(dir, cmd, NON_INTERACTIVE_ENV)?;
     }
     Ok(())
 }
@@ -148,7 +148,7 @@ fn run_install(dir: &str, cmds: &[String]) -> Result<()> {
                 NON_INTERACTIVE_ENV,
             );
         if !offline {
-            shell::exec_in_dir(dir, cmd, NON_INTERACTIVE_ENV)?;
+            shell::exec_in_dir_checked(dir, cmd, NON_INTERACTIVE_ENV)?;
         }
     }
     Ok(())
@@ -194,7 +194,7 @@ fn today_iso() -> String {
 // -- provision --------------------------------------------------------------
 
 /// Where the branch's workspace lives: wherever the branch is already checked
-/// out — another tool (Herdr) may have made the worktree — else `pattern_dir`.
+/// out — another tool may have made the worktree — else `pattern_dir`.
 /// The main checkout never counts: a workspace needs its own worktree.
 fn worktree_dir_for(
     worktrees: &[git::WorktreeEntry],
@@ -803,7 +803,7 @@ pub fn reset_database(ws: &Workspace, pc: &ProjectConfig) -> Result<Vec<StepEven
     events.push(step(ResetStep::Clone, Status::Done, None));
 
     for cmd in &pc.commands.db {
-        shell::exec_in_dir(&ws.path, cmd, NON_INTERACTIVE_ENV)?;
+        shell::exec_in_dir_checked(&ws.path, cmd, NON_INTERACTIVE_ENV)?;
         events.push(step(ResetStep::Db, Status::Done, Some(cmd.clone())));
     }
 
@@ -834,10 +834,10 @@ mod tests {
     fn adopts_the_branch_checkout_made_outside_ship() {
         let worktrees = [
             wt("/code/app", "main"),
-            wt("/home/.herdr/worktrees/app/feat-x", "feat-x"),
+            wt("/home/.other-tool/worktrees/app/feat-x", "feat-x"),
         ];
         let dir = worktree_dir_for(&worktrees, "/code/app", "feat-x", "/code/app-feat-x".into());
-        assert_eq!(dir, "/home/.herdr/worktrees/app/feat-x");
+        assert_eq!(dir, "/home/.other-tool/worktrees/app/feat-x");
     }
 
     #[test]

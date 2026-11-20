@@ -20,10 +20,11 @@ description: Per-branch dev workspaces with the ship CLI — a git worktree, a c
 | Task | Command |
 |---|---|
 | Create or resume | `ship create <project> <branch> [--base <branch>] --no-editor`. A branch already checked out in another worktree is adopted at its path. |
+| Provision a worktree another tool made | `ship adopt` inside it: project from git, branch from HEAD, no arguments, never opens an editor. Fails outside a registered project's worktree, in the main checkout, and on a detached HEAD. Undo with `ship down --db-only --force`, which keeps the checkout. |
 | Create cheap (code only) | `ship create <project> <branch> --bare --no-editor`: worktree, copied files, `.env` as is except `database_url` vars emptied (`DATABASE_URL=`: anything that needs the database fails until the upgrade), install. No database, port, route; `ship up`, `reset` and `db` do not work on it. `ship create <project> <branch>` later upgrades it. `ls --json` shows `"bare": true`, `port` 0. |
 | Worktree location | `ship config worktree-root <path>` sends new worktrees to `<path>/<repo>/<branch_slug>`; `--clear` restores each project's `dirPattern`. |
 | Find one | `ship ls <project> --json` → `path`, `proxyDomain`, `port`, `ports`, `dbName` |
-| Dev server | `ship up` in the workspace directory. It blocks until the server exits: run it in the background. ship sets `PORT`, plus `<NAME>_PORT` per named port. |
+| Dev server | `ship up` in the workspace directory. It blocks until the server exits: run it in the background. ship sets `PORT`, plus `<NAME>_PORT` per named port. After a branch rename it moves the workspace to the new branch's domain (route, `.env` proxy URLs, registry); the database keeps its name. |
 | Re-clone the database | `ship reset` in the workspace directory |
 | Run SQL | `ship db exec "<sql>"` in the workspace directory |
 | Tear down | `ship down <project> <branch> --force` |
@@ -70,6 +71,7 @@ Never invent a value the repo does not show; ask the user.
   - `proxy_url`: swap the origin for `https://<workspace domain>`
   - `dev_url`: becomes `http://localhost:<port><path>`; set `"path"` for the suffix, `"port": "<name>"` for a named port
   - `port`: becomes the bare port number; `"port": "<name>"` for a named port
+  - `workspace_value`: becomes `"value"` in every workspace, e.g. `{"type": "workspace_value", "value": "memory"}`. `ship init` never proposes it; write it into config.json when the user asks for a per-workspace setting.
   - `plain`: copy verbatim — sqlite paths, anything worktree-relative
 - `copy`: gitignored files or directories copied into each new worktree (sqlite files, certs).
 

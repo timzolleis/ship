@@ -93,6 +93,15 @@ pub enum Error {
     )]
     NotInProject,
 
+    #[error("'{path}' is not a checkout of a registered project. Run 'ship init' in the project's main checkout first.")]
+    NotInProjectCheckout { path: String },
+
+    #[error("'{path}' is the project's main checkout. Run 'ship adopt' in one of its worktrees.")]
+    AdoptMainCheckout { path: String },
+
+    #[error("HEAD is detached in '{path}'. Check out a branch, then run 'ship adopt' again.")]
+    DetachedHead { path: String },
+
     #[error("Unknown target '{target}'. Use: editor, url, db")]
     UnknownTarget { target: String },
 

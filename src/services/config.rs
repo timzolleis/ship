@@ -206,6 +206,18 @@ pub fn update_workspace(ws: &Workspace) -> Result<()> {
     })
 }
 
+/// Replaces the entry registered under `branch_before_rename` with `renamed`,
+/// keeping the registry's order.
+pub fn rename_workspace(branch_before_rename: &str, renamed: &Workspace) -> Result<()> {
+    update_registry(&config_dir(), |all| {
+        for w in all.iter_mut() {
+            if w.project == renamed.project && w.branch == branch_before_rename {
+                *w = renamed.clone();
+            }
+        }
+    })
+}
+
 pub fn remove_workspace(project: &str, branch: &str) -> Result<()> {
     update_registry(&config_dir(), |all| {
         all.retain(|w| !(w.project == project && w.branch == branch));

@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 //   - proxy_url    → swap the http(s)://<origin> for https://<proxy_domain>.
 //   - dev_url      → http://localhost:<port><configured path suffix>.
 //   - port         → <port>.
+//   - workspace_value → its configured `value`; untouched without one.
 //   - plain        → untouched.
 //   - dev_url and port take the routed port, or the named one in `port`; a
 //     name the workspace lacks leaves the value untouched (`ports::check`
@@ -118,6 +119,7 @@ pub fn patch_env_content(
                 Some(port) => port.to_string(),
                 None => value.clone(),
             },
+            EnvVarType::WorkspaceValue => var_config.value.clone().unwrap_or_else(|| value.clone()),
             EnvVarType::Plain => value.clone(),
         };
 
@@ -161,6 +163,7 @@ mod tests {
                         var_type: *t,
                         path: None,
                         port: None,
+                        value: None,
                     },
                 )
             })
@@ -218,6 +221,20 @@ mod tests {
             out.content,
             "# comment\nSECRET=abc\nBETTER_AUTH_URL=https://tim-feature.znb.localhost"
         );
+        assert_eq!(out.changes.len(), 1);
+    }
+
+    #[test]
+    fn workspace_value_replaces_the_main_checkouts_value() {
+        let vars: EnvFileVars = serde_json::from_str(
+            r#"{
+              "OBJECT_STORAGE": { "type": "workspace_value", "value": "memory" },
+              "EMAIL_DELIVERY": { "type": "workspace_value" }
+            }"#,
+        )
+        .unwrap();
+        let out = patch_env_content("OBJECT_STORAGE=s3\nEMAIL_DELIVERY=smtp", &vars, &ctx());
+        assert_eq!(out.content, "OBJECT_STORAGE=memory\nEMAIL_DELIVERY=smtp");
         assert_eq!(out.changes.len(), 1);
     }
 

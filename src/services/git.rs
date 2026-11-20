@@ -245,6 +245,40 @@ pub fn resolve_base(repo: &str, base: Option<&str>) -> String {
     }
 }
 
+/// The main checkout of the repo `dir` is in, from any of its worktrees: the
+/// common git dir without its `/.git`.
+pub fn main_checkout_path(dir: &str) -> Result<String> {
+    let common_dir = run(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?
+    .stdout
+    .trim()
+    .to_string();
+    Ok(common_dir
+        .strip_suffix("/.git")
+        .map(str::to_string)
+        .unwrap_or(common_dir))
+}
+
+/// The root of the checkout `dir` is in: a worktree's own directory.
+pub fn checkout_root_path(dir: &str) -> Result<String> {
+    Ok(run(dir, &["rev-parse", "--show-toplevel"])?
+        .stdout
+        .trim()
+        .to_string())
+}
+
+/// HEAD's branch in `dir`; None when HEAD is detached.
+pub fn current_branch(dir: &str) -> Result<Option<String>> {
+    let head = run(dir, &["rev-parse", "--symbolic-full-name", "HEAD"])?;
+    Ok(head
+        .stdout
+        .trim()
+        .strip_prefix("refs/heads/")
+        .map(str::to_string))
+}
+
 /// Fast-forward a local branch ref to match origin (works for
 /// non-checked-out branches).
 pub fn update_branch(repo: &str, branch: &str) -> Result<()> {
@@ -353,6 +387,23 @@ mod tests {
         run(&work, &["branch", "local-only"]).unwrap();
         assert_eq!(resolve_base(&work, Some("local-only")), "local-only");
         assert_eq!(resolve_base(&work, Some("main")), "origin/main");
+    }
+
+    #[test]
+    fn a_worktree_knows_its_main_checkout_and_branch() {
+        let work = repo("main-checkout");
+        let tree = format!("{work}-feat");
+        worktree_add(&work, &tree, "feat/x", None).unwrap();
+        let main = fs::canonicalize(&work).unwrap().display().to_string();
+        let checkout = fs::canonicalize(&tree).unwrap().display().to_string();
+
+        assert_eq!(main_checkout_path(&tree).unwrap(), main);
+        assert_eq!(main_checkout_path(&work).unwrap(), main);
+        assert_eq!(checkout_root_path(&tree).unwrap(), checkout);
+        assert_eq!(current_branch(&tree).unwrap().as_deref(), Some("feat/x"));
+
+        run(&tree, &["switch", "--detach"]).unwrap();
+        assert_eq!(current_branch(&tree).unwrap(), None);
     }
 
     #[test]

@@ -23,15 +23,17 @@ pub enum EnvVarType {
     ProxyUrl,
     DevUrl,
     Port,
+    WorkspaceValue,
     Plain,
 }
 
 impl EnvVarType {
-    pub const ALL: [EnvVarType; 5] = [
+    pub const ALL: [EnvVarType; 6] = [
         EnvVarType::DatabaseUrl,
         EnvVarType::ProxyUrl,
         EnvVarType::DevUrl,
         EnvVarType::Port,
+        EnvVarType::WorkspaceValue,
         EnvVarType::Plain,
     ];
 
@@ -43,6 +45,7 @@ impl EnvVarType {
             EnvVarType::ProxyUrl => "proxy_url",
             EnvVarType::DevUrl => "dev_url",
             EnvVarType::Port => "port",
+            EnvVarType::WorkspaceValue => "workspace_value",
             EnvVarType::Plain => "plain",
         }
     }
@@ -54,6 +57,7 @@ impl EnvVarType {
             EnvVarType::ProxyUrl => "swap proxy domain",
             EnvVarType::DevUrl => "point at local dev port",
             EnvVarType::Port => "set to the workspace port",
+            EnvVarType::WorkspaceValue => "set to the workspace value",
             EnvVarType::Plain => "leave untouched",
         }
     }
@@ -64,6 +68,9 @@ impl EnvVarType {
             EnvVarType::ProxyUrl => "swap the origin for the workspace proxy domain",
             EnvVarType::DevUrl => "replace with http://localhost:<port><path>",
             EnvVarType::Port => "replace with the port number",
+            EnvVarType::WorkspaceValue => {
+                "replace with \"value\": what every workspace uses instead of the main checkout's"
+            }
             EnvVarType::Plain => {
                 "copy verbatim — use for sqlite paths and anything worktree-relative"
             }
@@ -82,6 +89,9 @@ pub struct EnvVarConfig {
     /// `dev_url` and `port` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
+    /// What every workspace gets. `workspace_value` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +432,18 @@ mod tests {
         let pc: ProjectConfig = serde_json::from_str(&json).unwrap();
         assert!(pc.database.is_none());
         assert!(serde_json::to_value(&pc).unwrap().get("database").is_none());
+    }
+
+    #[test]
+    fn workspace_value_round_trips_its_value() {
+        let json = r#"{ "OBJECT_STORAGE": { "type": "workspace_value", "value": "memory" } }"#;
+        let vars: EnvFileVars = serde_json::from_str(json).unwrap();
+        assert_eq!(vars["OBJECT_STORAGE"].var_type, EnvVarType::WorkspaceValue);
+        assert_eq!(vars["OBJECT_STORAGE"].value.as_deref(), Some("memory"));
+
+        let written = serde_json::to_value(&vars).unwrap();
+        assert_eq!(written["OBJECT_STORAGE"]["type"], "workspace_value");
+        assert_eq!(written["OBJECT_STORAGE"]["value"], "memory");
     }
 
     #[test]
